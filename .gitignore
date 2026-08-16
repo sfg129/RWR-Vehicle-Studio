@@ -39,7 +39,7 @@ Desktop.ini
 !.env.example
 
 # Local scratch directory and RWR assets used for manual checks
-Core/
+/Core/
 /*.vehicle
 /*.weapon
 /*.mesh
