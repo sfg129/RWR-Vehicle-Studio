@@ -1,0 +1,36 @@
+{
+  "name": "rwr-vehicle-studio",
+  "version": "0.2.3",
+  "description": "Offline visual vehicle editor for Running With Rifles modding workflows",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sfg129/RWR-Vehicle-Studio.git"
+  },
+  "homepage": "https://github.com/sfg129/RWR-Vehicle-Studio",
+  "bugs": {
+    "url": "https://github.com/sfg129/RWR-Vehicle-Studio/issues"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "vue-tsc --noEmit && tauri build",
+    "build:frontend": "vue-tsc --noEmit && vite build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0",
+    "three": "^0.180.0",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.0",
+    "@types/three": "^0.180.0",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.1.0",
+    "vitest": "^3.2.0",
+    "vue-tsc": "^3.0.0"
+  }
+}

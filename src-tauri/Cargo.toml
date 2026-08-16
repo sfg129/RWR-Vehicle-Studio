@@ -1,0 +1,22 @@
+[package]
+name = "rwr-vehicle-studio"
+version = "0.2.3"
+edition = "2021"
+description = "Offline visual vehicle editor for Running With Rifles modding workflows"
+license = "GPL-3.0-only"
+repository = "https://github.com/sfg129/RWR-Vehicle-Studio"
+
+[lib]
+name = "rwr_vehicle_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+walkdir = "2"
