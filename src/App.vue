@@ -294,6 +294,12 @@ function undo() {
 }
 async function save(saveAs = false) {
   if (!document.value || !opened.value) return;
+  if (!saveAs) {
+    try {
+      const disk = await desktop.readText(opened.value.path);
+      if (disk !== savedText.value && !confirm('该文件已被其它程序修改，仍要用当前内容覆盖吗？')) return;
+    } catch { /* 文件暂不可读（如被移动）时按可覆盖处理 */ }
+  }
   try { const text = document.value.serialize(); const wasAutomaticBase = baseAutomatic.value; const saved = await desktop.saveVehicle(opened.value.path, text, saveAs); if (!saved) return; opened.value = { name: saved.name, path: saved.path, text }; savedText.value = text; document.value.commit(text); document.value.markSaved(); if (saveAs && wasAutomaticBase) await resolveAutomaticBase(); rebuildPreview(); status.value = saved.backupPath ? `已保存；备份：${saved.backupPath}` : `已保存：${saved.path}`; }
   catch (e) { fail(e); }
 }
