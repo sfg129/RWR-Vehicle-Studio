@@ -21,6 +21,7 @@ export class SceneController {
   private doc?: SourceDocument; private catalog?: ResourceCatalog; private soldier?: SoldierAssets; private options?: ViewOptions;
   private meshCache = new Map<string, Promise<OgreMesh>>(); private textureCache = new Map<string, Promise<THREE.Texture>>(); private voxelCache = new Map<string, Promise<StaticVoxel[]>>();
   private nodeObjects = new Map<number, THREE.Object3D>(); private occupants: Occupant[] = []; private startTime = performance.now();
+  private sceneGeneration = 0;
   private pickTargets: THREE.Object3D[] = []; private raycaster = new THREE.Raycaster(); private pointer = new THREE.Vector2(); private frame = 0;
   private lastAnimationUpdate = -Infinity; private readonly animationIntervalMs = 50;
   private fpsFrames = 0; private fpsStarted = performance.now();
@@ -49,6 +50,7 @@ export class SceneController {
   }
 
   async setDocument(doc: SourceDocument, catalog: ResourceCatalog, soldier: SoldierAssets | undefined, options: ViewOptions): Promise<void> {
+    const generation = ++this.sceneGeneration;
     this.doc = doc; this.catalog = catalog; this.soldier = soldier; this.options = options; this.transform.detach(); this.drag = undefined; this.startTime = performance.now(); this.lastAnimationUpdate = -Infinity;
     this.clearRoot(); const root = doc.root; if (!root) return;
     const physics = root.children.find((n) => n.name === 'physics'); const globalOffset = vec3(physics ? doc.value(physics, 'visual_offset') : undefined);
@@ -57,7 +59,8 @@ export class SceneController {
       const a = doc.attrs(visual); if (!visualMatchesDamageState(doc, visual, options.showBroken)) continue;
       const path = catalog.resolve(a.mesh_filename, 'model'); if (!path) continue;
       try {
-        const mesh = await this.loadMesh(path); const object = await this.buildMesh(mesh, visual); const own = vec3(a.offset);
+        const mesh = await this.loadMesh(path); if (generation !== this.sceneGeneration) return;
+        const object = await this.buildMesh(mesh, visual, generation); if (generation !== this.sceneGeneration) return; const own = vec3(a.offset);
         let origin: Vec3 = [globalOffset[0] + own[0], globalOffset[1] + own[1], globalOffset[2] + own[2]];
         if (a.class === 'tire') {
           const tire = tireVisualPosition(doc, visual);
@@ -74,7 +77,7 @@ export class SceneController {
         object.position.set(...origin); object.userData.nodeId = visual.id; object.traverse((o) => o.userData.nodeId = visual.id); this.root.add(object); this.pickTargets.push(object); this.nodeObjects.set(visual.id, object);
       } catch (error) { console.warn(`模型加载失败：${a.mesh_filename}`, error); }
     }
-    for (const [index, turret] of turrets.entries()) await this.addWeapon(turret, index, globalOffset);
+    for (const [index, turret] of turrets.entries()) { await this.addWeapon(turret, index, globalOffset, generation); if (generation !== this.sceneGeneration) return; }
     if (options.showBounds && physics) this.addBounds(physics);
     if (options.showOccupants && soldier) for (const slot of root.children.filter((n) => n.name === 'character_slot')) this.addOccupant(slot, turrets);
   }
@@ -93,8 +96,8 @@ export class SceneController {
   topView(): void { this.camera.position.set(0, 28, 0.01); this.controls.target.set(0, 0, 0); this.controls.update(); }
   sideView(): void { this.camera.position.set(28, 4, 0); this.controls.target.set(0, 1.5, 0); this.controls.update(); }
 
-  private async addWeapon(turret: SourceNode, index: number, global: Vec3): Promise<void> {
-    if (!this.doc || !this.catalog) return; const a = this.doc.attrs(turret); const weapon = await this.catalog.weapon(a.weapon_key); if (!weapon) return;
+  private async addWeapon(turret: SourceNode, index: number, global: Vec3, generation: number): Promise<void> {
+    if (!this.doc || !this.catalog) return; const a = this.doc.attrs(turret); const weapon = await this.catalog.weapon(a.weapon_key); if (generation !== this.sceneGeneration || !weapon) return;
     try {
       const pose = turretWorldPose(this.doc, this.doc.root?.children.filter((n) => n.name === 'turret') ?? [], index);
       if (!pose) return;
@@ -102,11 +105,11 @@ export class SceneController {
       group.position.set(global[0] + pose.position[0], global[1] + pose.position[1], global[2] + pose.position[2]); group.rotation.y = pose.rotation;
       if (weapon.mesh) {
         const path = this.catalog.resolve(weapon.mesh, 'model');
-        if (path) { const mesh = await this.loadMesh(path); const object = await this.buildMeshWithTextures(mesh, weapon.texture ? [weapon.texture] : []); object.position.set(...weaponOffset); group.add(object); }
+        if (path) { const mesh = await this.loadMesh(path); if (generation !== this.sceneGeneration) return; const object = await this.buildMeshWithTextures(mesh, weapon.texture ? [weapon.texture] : [], generation); if (generation !== this.sceneGeneration) return; object.position.set(...weaponOffset); group.add(object); }
       }
       if (weapon.voxelModel) {
         const path = this.catalog.resolve(weapon.voxelModel, 'model');
-        if (path) { const voxels = await this.loadVoxels(path); const object = this.buildVoxelModel(voxels); object.position.set(...weaponOffset); object.rotation.y = WEAPON_LOGICAL_TO_MODEL_YAW; group.add(object); }
+        if (path) { const voxels = await this.loadVoxels(path); if (generation !== this.sceneGeneration) return; const object = this.buildVoxelModel(voxels); object.position.set(...weaponOffset); object.rotation.y = WEAPON_LOGICAL_TO_MODEL_YAW; group.add(object); }
       }
       if (this.options?.showShields) {
         const shieldFrame = new THREE.Group(); shieldFrame.position.set(...weaponOffset); shieldFrame.rotation.y = WEAPON_LOGICAL_TO_MODEL_YAW;
@@ -151,12 +154,12 @@ export class SceneController {
     this.occupants.push({ mesh, animation, assets: this.soldier, pose: poseBuffer, dynamic: !this.soldier.isStatic(animation) });
   }
 
-  private async buildMesh(mesh: OgreMesh, visual: SourceNode): Promise<THREE.Group> {
+  private async buildMesh(mesh: OgreMesh, visual: SourceNode, generation: number): Promise<THREE.Group> {
     if (!this.doc) return new THREE.Group(); const a = this.doc.attrs(visual);
     const parts = visual.children.filter((n) => n.name === 'part').map((n) => this.doc!.value(n, 'texture_filename') ?? '');
-    return this.buildMeshWithTextures(mesh, parts.length ? parts : [a.texture_filename ?? '']);
+    return this.buildMeshWithTextures(mesh, parts.length ? parts : [a.texture_filename ?? ''], generation);
   }
-  private async buildMeshWithTextures(mesh: OgreMesh, textures: string[]): Promise<THREE.Group> {
+  private async buildMeshWithTextures(mesh: OgreMesh, textures: string[], generation: number): Promise<THREE.Group> {
     const group = new THREE.Group(); if (!this.catalog) return group;
     for (let i = 0; i < mesh.submeshes.length; i++) {
       const sub = mesh.submeshes[i], data = sub.useSharedVertices ? mesh.sharedGeometry : sub.geometry; if (!data || sub.operationType !== 4) continue;
@@ -164,7 +167,7 @@ export class SceneController {
       if (data.normals.length === data.positions.length) geometry.setAttribute('normal', new THREE.Float32BufferAttribute(data.normals, 3)); else geometry.computeVertexNormals();
       if (data.uvs.length >= data.vertexCount * 2) geometry.setAttribute('uv', new THREE.Float32BufferAttribute(data.uvs, 2)); geometry.setIndex(sub.indices); geometry.computeBoundingSphere();
       const textureName = textures[Math.min(i, textures.length - 1)] || textures[0]; const texturePath = this.catalog.resolve(textureName, 'texture');
-      let map: THREE.Texture | undefined; if (texturePath) try { map = await this.loadTexture(texturePath); } catch { /* fallback material */ }
+      let map: THREE.Texture | undefined; if (texturePath) try { map = await this.loadTexture(texturePath); if (generation !== this.sceneGeneration) return group; } catch { /* fallback material */ }
       const material = new THREE.MeshStandardMaterial({ map, color: map ? 0xffffff : colorFromName(sub.materialName), roughness: 0.78, metalness: 0.08, side: THREE.DoubleSide });
       const part = new THREE.Mesh(geometry, material); part.castShadow = false; part.receiveShadow = false; part.name = sub.name; group.add(part);
     }

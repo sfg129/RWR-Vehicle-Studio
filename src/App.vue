@@ -71,27 +71,34 @@ async function openVehicle() {
   }
   catch (e) { fail(e); }
 }
+let vehicleLoadToken = 0;
 async function loadOpenedVehicle(file: OpenedFile) {
+  const token = ++vehicleLoadToken;
   opened.value = file; document.value = new SourceDocument(file.text); savedText.value = file.text; undoStack.value = []; missing.value = [];
-  await resolveAutomaticBase(); rebuildPreview(false);
+  await resolveAutomaticBase(token);
+  if (token !== vehicleLoadToken) return;
+  rebuildPreview(false);
   if (Object.values(rememberedSelection.folders).every(Boolean)) {
     status.value = `已打开 ${file.name}；正在载入上次使用的资源预设…`;
-    await indexRememberedResources(rememberedSelection);
+    await indexRememberedResources(rememberedSelection, token);
   } else {
     status.value = `已打开 ${file.name}；请配置资源文件夹`;
-    await loadSoldier(); resourceDialog.value = true;
+    await loadSoldier(token);
+    if (token !== vehicleLoadToken) return;
+    resourceDialog.value = true;
   }
 }
-async function resolveAutomaticBase() {
+async function resolveAutomaticBase(token = ++vehicleLoadToken) {
   baseOpened.value = undefined; baseDocument.value = undefined; baseAutomatic.value = false; baseError.value = '';
   baseReference.value = document.value ? vehicleBaseReference(document.value) ?? '' : '';
   if (!baseReference.value || !opened.value) return;
   try {
     const resolved = await desktop.resolveVehicleBase(opened.value.path, baseReference.value);
+    if (token !== vehicleLoadToken) return;
     if (!resolved) { baseError.value = `同目录下未找到 ${baseReference.value}`; return; }
     if (resolved.path === opened.value.path) { baseError.value = '基础文件不能指向当前载具自身'; return; }
     baseOpened.value = resolved; baseDocument.value = new SourceDocument(resolved.text); baseAutomatic.value = true;
-  } catch (error) { baseError.value = message(error); }
+  } catch (error) { if (token === vehicleLoadToken) baseError.value = message(error); }
 }
 async function chooseBaseVehicle() {
   try {
@@ -146,28 +153,29 @@ async function activateWorkspaceEntry(entry: VehicleWorkspaceEntry) {
   try { await loadOpenedVehicle(await desktop.openVehiclePath(entry.path)); }
   catch (error) { fail(error); }
 }
-async function indexRememberedResources(selection: ResourceSelection) {
+async function indexRememberedResources(selection: ResourceSelection, token: number) {
   try {
-    for (const kind of ['model', 'texture', 'weapon'] as ResourceKind[]) await catalog.setFolder(kind, selection.folders[kind]);
-    await resourcesApplied(selection);
+    for (const kind of ['model', 'texture', 'weapon'] as ResourceKind[]) { await catalog.setFolder(kind, selection.folders[kind]); if (token !== vehicleLoadToken) return; }
+    await resourcesApplied(selection, token);
   } catch (error) {
-    status.value = `上次使用的资源路径不可用：${message(error)}`; resourceDialog.value = true;
+    if (token === vehicleLoadToken) { status.value = `上次使用的资源路径不可用：${message(error)}`; resourceDialog.value = true; }
   }
 }
-async function resourcesApplied(selection: ResourceSelection) {
+async function resourcesApplied(selection: ResourceSelection, token = ++vehicleLoadToken) {
   rememberedSelection = cloneResourceSelection(selection); supportModel.value = selection.supportModel; supportAnimations.value = selection.supportAnimations;
-  resourceDialog.value = false; await loadSoldier(); await validate(); revision.value++; await loadSelectedWeaponEditor(); status.value = `已载入：${entries.value.filter((e) => e.kind === 'visual').length} 个外观，${entries.value.filter((e) => e.kind === 'slot').length} 个乘员位`;
+  resourceDialog.value = false; await loadSoldier(token); if (token !== vehicleLoadToken) return; await validate(); if (token !== vehicleLoadToken) return; revision.value++; await loadSelectedWeaponEditor(); status.value = `已载入：${entries.value.filter((e) => e.kind === 'visual').length} 个外观，${entries.value.filter((e) => e.kind === 'slot').length} 个乘员位`;
 }
-async function loadSoldier() {
+async function loadSoldier(token = ++vehicleLoadToken) {
   if (!supportModel.value || !supportAnimations.value) { soldier.value = undefined; return; }
   try {
     const [model, animations] = await Promise.all([
       supportModel.value === BUILTIN_SUPPORT_MODEL ? desktop.readBuiltinSupport('model') : desktop.readText(supportModel.value),
       supportAnimations.value === BUILTIN_SUPPORT_ANIMATIONS ? desktop.readBuiltinSupport('animation') : desktop.readText(supportAnimations.value),
     ]);
+    if (token !== vehicleLoadToken) return;
     soldier.value = SoldierAssets.parse(model, animations);
   }
-  catch (e) { soldier.value = undefined; status.value = `人物预览未载入：${message(e)}`; }
+  catch (e) { if (token === vehicleLoadToken) { soldier.value = undefined; status.value = `人物预览未载入：${message(e)}`; } }
 }
 let weaponLoadToken = 0;
 async function loadSelectedWeaponEditor() {
