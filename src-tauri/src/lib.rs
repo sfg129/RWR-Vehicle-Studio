@@ -275,15 +275,8 @@ async fn save_vehicle(app: AppHandle, state: State<'_, AppState>, path: String, 
         requested
     };
     let target = ensure_vehicle_extension(target);
-    let backup = if target.exists() {
-        let b = PathBuf::from(format!("{}.bak", display(&target)));
-        fs::copy(&target, &b).map_err(|e| format!("创建备份失败：{e}"))?;
-        Some(b)
-    } else { None };
-    let temp = PathBuf::from(format!("{}.rwrstudio.tmp", display(&target)));
-    fs::write(&temp, text.as_bytes()).map_err(|e| format!("写入临时文件失败：{e}"))?;
-    fs::copy(&temp, &target).map_err(|e| format!("替换载具文件失败：{e}"))?;
-    let _ = fs::remove_file(&temp);
+    let backup = write_backup(&target)?;
+    atomic_write(&target, text.as_bytes())?;
     let canonical = target.canonicalize().map_err(|e| format!("无法确认已保存文件：{e}"))?;
     state.writable.lock().map_err(|_| "文件权限状态不可用")?.insert(canonical.clone());
     Ok(Some(SavedFile { name: file_name(&canonical), path: display(&canonical), backup_path: backup.map(|p| display(&p)) }))
@@ -295,13 +288,55 @@ fn save_weapon(path: String, text: String) -> Result<SavedFile, String> {
     if !target.is_file() || !target.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("weapon")) {
         return Err("拒绝保存：目标不是现有的 .weapon 文件".into())
     }
-    let backup = PathBuf::from(format!("{}.bak", display(&target)));
-    fs::copy(&target, &backup).map_err(|e| format!("创建武器备份失败：{e}"))?;
-    let temp = PathBuf::from(format!("{}.rwrstudio.tmp", display(&target)));
-    fs::write(&temp, text.as_bytes()).map_err(|e| format!("写入武器临时文件失败：{e}"))?;
-    fs::copy(&temp, &target).map_err(|e| format!("替换武器文件失败：{e}"))?;
-    let _ = fs::remove_file(&temp);
-    Ok(SavedFile { name: file_name(&target), path: display(&target), backup_path: Some(display(&backup)) })
+    let backup = write_backup(&target)?;
+    atomic_write(&target, text.as_bytes())?;
+    Ok(SavedFile { name: file_name(&target), path: display(&target), backup_path: backup.map(|p| display(&p)) })
+}
+
+/// Keep a rolling chain of backups (`.bak`, `.bak1`, `.bak2`); returns the newest backup path.
+fn write_backup(target: &Path) -> Result<Option<PathBuf>, String> {
+    if !target.exists() { return Ok(None) }
+    const GENERATIONS: usize = 3;
+    let backup = PathBuf::from(format!("{}.bak", display(target)));
+    for i in (1..GENERATIONS).rev() {
+        let older = PathBuf::from(format!("{}{i}", display(&backup)));
+        let _ = fs::remove_file(&older);
+        let newer = if i == 1 { backup.clone() } else { PathBuf::from(format!("{}{}", display(&backup), i - 1)) };
+        if newer.exists() { let _ = fs::rename(&newer, &older); }
+    }
+    fs::copy(target, &backup).map_err(|e| format!("创建备份失败：{e}"))?;
+    Ok(Some(backup))
+}
+
+/// Write bytes to a unique same-directory temp file, fsync, then replace the target.
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().and_then(|v| v.to_str()).unwrap_or("file");
+    let unique = format!(".{name}.{}.{}.tmp", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+    let temp = parent.join(unique);
+    let result = (|| -> Result<(), String> {
+        let mut file = fs::File::create(&temp).map_err(|e| format!("创建临时文件失败：{e}"))?;
+        file.write_all(bytes).map_err(|e| format!("写入临时文件失败：{e}"))?;
+        file.sync_all().map_err(|e| format!("同步临时文件失败：{e}"))?;
+        drop(file);
+        replace_file(&temp, path)?;
+        Ok(())
+    })();
+    if result.is_err() { let _ = fs::remove_file(&temp); }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
+    fs::rename(from, to).map_err(|e| format!("原子替换文件失败：{e}"))
+}
+#[cfg(windows)]
+fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
+    // std::fs::rename cannot overwrite an existing destination on Windows;
+    // the backup captured above preserves the previous content.
+    if to.exists() { fs::remove_file(to).map_err(|e| format!("替换文件失败：{e}"))?; }
+    fs::rename(from, to).map_err(|e| format!("替换文件失败：{e}"))
 }
 
 fn decode_text(mut bytes: Vec<u8>) -> Result<String, String> {
@@ -338,6 +373,26 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "<weapon><shield offset=\"1 2 3\" extent=\"4 5 6\"/></weapon>");
         assert!(fs::read_to_string(&backup).unwrap().contains("offset=\"0 0 0\"")); assert!(saved.backup_path.as_deref().is_some_and(|value| value.ends_with(".weapon.bak")));
         let _ = fs::remove_file(path); let _ = fs::remove_file(backup);
+    }
+
+    #[test]
+    fn save_rotates_backup_generations_and_leaves_no_temp() {
+        let unique = format!("rwrstudio-rolling-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let path = std::env::temp_dir().join(format!("{unique}.weapon"));
+        fs::write(&path, "<weapon>v0</weapon>").unwrap();
+        for v in 1..=4 { save_weapon(display(&path), format!("<weapon>v{v}</weapon>")).unwrap(); }
+        assert_eq!(fs::read_to_string(&path).unwrap(), "<weapon>v4</weapon>");
+        let bak = PathBuf::from(format!("{}.bak", display(&path)));
+        let bak1 = PathBuf::from(format!("{}.bak1", display(&path)));
+        let bak2 = PathBuf::from(format!("{}.bak2", display(&path)));
+        assert_eq!(fs::read_to_string(&bak).unwrap(), "<weapon>v3</weapon>");
+        assert_eq!(fs::read_to_string(&bak1).unwrap(), "<weapon>v2</weapon>");
+        assert_eq!(fs::read_to_string(&bak2).unwrap(), "<weapon>v1</weapon>");
+        let parent = path.parent().unwrap();
+        let leftover_temp = fs::read_dir(parent).unwrap().filter_map(Result::ok)
+            .any(|e| e.file_name().to_string_lossy().starts_with(&format!(".{unique}.weapon.")) && e.file_name().to_string_lossy().ends_with(".tmp"));
+        assert!(!leftover_temp, "临时文件未被清理");
+        let _ = fs::remove_file(&path); let _ = fs::remove_file(&bak); let _ = fs::remove_file(&bak1); let _ = fs::remove_file(&bak2);
     }
 }
 
