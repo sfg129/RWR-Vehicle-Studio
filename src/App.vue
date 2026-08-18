@@ -275,7 +275,7 @@ async function save(saveAs = false) {
   catch (e) { fail(e); }
 }
 async function reload() { if (!opened.value || dirty.value && !confirm('未保存修改将丢失，仍要重新载入吗？')) return; try { const text = await desktop.readText(opened.value.path); document.value = new SourceDocument(text); savedText.value = text; undoStack.value = []; if (baseAutomatic.value || !baseOpened.value) await resolveAutomaticBase(); rebuildPreview(); status.value = '已从磁盘重新载入'; } catch (e) { fail(e); } }
-async function overrideChanged() { await validate(); revision.value++; }
+async function overrideChanged() { await validate(); revision.value++; await loadSelectedWeaponEditor(); }
 function fail(e: unknown) { status.value = `错误：${message(e)}`; }
 function message(e: unknown) { return e instanceof Error ? e.message : String(e); }
 function keydown(event: KeyboardEvent) { if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z') { event.preventDefault(); undo(); } }

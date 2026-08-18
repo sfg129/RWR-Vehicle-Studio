@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { SourceDocument } from '../src/core/xml/source-document';
-import { parseWeaponDefinition } from '../src/core/resources/resource-catalog';
+import { parseWeaponDefinition, ResourceCatalog } from '../src/core/resources/resource-catalog';
 import { parseStaticVoxelModel } from '../src/core/voxel/voxel-model';
 import { visualMatchesDamageState, weaponExtentToModel, weaponLogicalToModel, WEAPON_LOGICAL_TO_MODEL_YAW } from '../src/core/vehicle/vehicle-model';
+import { desktop } from '../src/platform/desktop-api';
 
 describe('结构编辑', () => {
   it('增加/删除对象和属性并保留可解析 XML', () => {
@@ -74,5 +75,23 @@ describe('损毁外观', () => {
     expect(visualMatchesDamageState(document, broken, false)).toBe(false);
     expect(visualMatchesDamageState(document, normal, true)).toBe(false);
     expect(visualMatchesDamageState(document, broken, true)).toBe(true);
+  });
+});
+
+describe('资源覆盖重解析（RV-006）', () => {
+  it('override 后 weapon() 返回新的物理路径，旧缓存被清除', async () => {
+    const readText = vi.spyOn(desktop, 'readText').mockImplementation(async (path: string) =>
+      path === 'B/gun.weapon' ? '<weapon><shield offset="2 2 2" extent="3 3 3"/></weapon>' : '<weapon><shield offset="1 1 1" extent="1 1 1"/></weapon>');
+    try {
+      const catalog = new ResourceCatalog();
+      catalog.indexes.weapon['gun.weapon'] = 'A/gun.weapon';
+      const before = await catalog.weapon('gun.weapon');
+      expect(before?.sourcePath).toBe('A/gun.weapon');
+      expect(before?.shields[0].offset).toEqual([1, 1, 1]);
+      catalog.override('B/gun.weapon');
+      const after = await catalog.weapon('gun.weapon');
+      expect(after?.sourcePath).toBe('B/gun.weapon');
+      expect(after?.shields[0].offset).toEqual([2, 2, 2]);
+    } finally { readText.mockRestore(); }
   });
 });
