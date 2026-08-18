@@ -250,6 +250,21 @@ describe('资源目录 same-path 快路径（RV-014）', () => {
       expect(catalog.indexes.texture).toEqual({ 't-file': 't' });
     } finally { scan.mockRestore(); }
   });
+  it('预置 folders 但从未扫描时，applyFolders 首次仍会扫描（不误触发快路径）', async () => {
+    let calls = 0;
+    const scan = vi.spyOn(desktop, 'scanFolder').mockImplementation(async (path: string) => { calls++; return { index: { [`${path}-file`]: path }, duplicates: [], warnings: [] }; });
+    try {
+      const catalog = new ResourceCatalog();
+      // 模拟 App 启动时预先设置 folders（尚未扫描）
+      catalog.folders = { model: 'm', texture: 't', weapon: 'w' };
+      await catalog.applyFolders({ model: 'm', texture: 't', weapon: 'w' });
+      expect(calls).toBe(3);
+      expect(catalog.indexes.model).toEqual({ 'm-file': 'm' });
+      // 已扫描后再次应用相同路径 -> 才走快路径
+      await catalog.applyFolders({ model: 'm', texture: 't', weapon: 'w' });
+      expect(calls).toBe(3);
+    } finally { scan.mockRestore(); }
+  });
 });
 
 describe('人物资源身份缓存（RV-015）', () => {

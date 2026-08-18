@@ -25,6 +25,7 @@ export class ResourceCatalog {
   overrides: Record<string, string> = {};
   private weaponCache = new Map<string, ResourceResult<WeaponModel>>();
   private scans: Record<ResourceKind, ResourceFolderScan> = { model: EMPTY_SCAN(), texture: EMPTY_SCAN(), weapon: EMPTY_SCAN() };
+  private scanned = false;
 
   /** Non-fatal diagnostics from the last folder scan, aggregated across the three kinds. */
   get scanDiagnostics(): { duplicates: string[]; warnings: string[] } {
@@ -33,11 +34,12 @@ export class ResourceCatalog {
   }
 
   async setFolder(kind: ResourceKind, folder: string): Promise<void> {
-    if (folder === this.folders[kind]) return; // same-path fast path (RV-014)
+    if (this.scanned && folder === this.folders[kind]) return; // same-path fast path (RV-014)
     const scan = folder ? await desktop.scanFolder(folder, kind) : EMPTY_SCAN();
     this.folders[kind] = folder;
     this.indexes[kind] = scan.index;
     this.scans[kind] = scan;
+    this.scanned = true;
     this.weaponCache.clear();
   }
   /** Scan all three folders first, then commit atomically; a failed scan leaves the catalog untouched. Unchanged paths are reused (RV-014). */
@@ -46,7 +48,7 @@ export class ResourceCatalog {
     const scans: Record<ResourceKind, ResourceFolderScan> = { model: EMPTY_SCAN(), texture: EMPTY_SCAN(), weapon: EMPTY_SCAN() };
     let changed = false;
     for (const kind of ['model', 'texture', 'weapon'] as ResourceKind[]) {
-      if (!force && folders[kind] === this.folders[kind]) { indexes[kind] = this.indexes[kind]; scans[kind] = this.scans[kind]; continue; }
+      if (!force && this.scanned && folders[kind] === this.folders[kind]) { indexes[kind] = this.indexes[kind]; scans[kind] = this.scans[kind]; continue; }
       const scan = folders[kind] ? await desktop.scanFolder(folders[kind], kind) : EMPTY_SCAN();
       indexes[kind] = scan.index;
       scans[kind] = scan;
@@ -55,6 +57,7 @@ export class ResourceCatalog {
     this.folders = { ...folders };
     this.indexes = indexes;
     this.scans = scans;
+    this.scanned = true;
     if (changed) this.weaponCache.clear();
   }
   /** Re-scan the currently configured folders (explicit refresh, bypasses the same-path fast path). */
@@ -65,6 +68,7 @@ export class ResourceCatalog {
     }
     this.indexes = { model: scans.model.index, texture: scans.texture.index, weapon: scans.weapon.index };
     this.scans = scans;
+    this.scanned = true;
     this.weaponCache.clear();
   }
   override(path: string): void { this.overrides[fileName(path).toLowerCase()] = path; this.weaponCache.clear(); }

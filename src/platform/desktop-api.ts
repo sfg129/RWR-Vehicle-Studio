@@ -23,7 +23,13 @@ export const desktop = {
   readBuiltinSupport: (kind: 'model' | 'animation') => invoke<string>('read_builtin_support', { kind }),
   scanFolder: (path: string, kind: ResourceKind) => invoke<ResourceFolderScan>('scan_resource_folder', { path, kind }),
   readText: (path: string) => invoke<string>('read_text_path', { path }),
-  readBinary: (path: string) => invoke<ArrayBuffer>('read_binary', { path }),
+  readBinary: async (path: string): Promise<ArrayBuffer> => {
+    const base64 = await invoke<string>('read_binary_base64', { path });
+    const raw = atob(base64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    return bytes.buffer;
+  },
   saveVehicle: (path: string, text: string, saveAs = false) =>
     invoke<SavedFile | null>('save_vehicle', { path, text, saveAs }),
   saveWeapon: (path: string, text: string) => invoke<SavedFile>('save_weapon', { path, text }),

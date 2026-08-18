@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Serialize;
 use std::{collections::{BTreeMap, BTreeSet, HashMap, HashSet}, fs, path::{Path, PathBuf}, sync::Mutex};
 use tauri::{AppHandle, Manager, State};
@@ -275,9 +276,9 @@ fn read_builtin_support(kind: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn read_binary(path: String) -> Result<tauri::ipc::Response, String> {
+fn read_binary_base64(path: String) -> Result<String, String> {
     let bytes = fs::read(&path).map_err(|e| format!("读取二进制资源失败：{e}"))?;
-    Ok(tauri::ipc::Response::new(bytes))
+    Ok(STANDARD.encode(bytes))
 }
 
 #[tauri::command]
@@ -486,7 +487,7 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![open_vehicle, open_vehicle_path, resolve_vehicle_base, choose_vehicle_base, choose_vehicle_workspace, scan_vehicle_workspace, scan_vehicle_schema, list_workspace_dir,
             choose_folder, choose_override_file, choose_support_file,
-            scan_resource_folder, read_text_path, read_builtin_support, read_binary, save_vehicle, save_weapon])
+            scan_resource_folder, read_text_path, read_builtin_support, read_binary_base64, save_vehicle, save_weapon])
         .run(tauri::generate_context!())
         .expect("RWR Vehicle Studio failed to start");
 }
