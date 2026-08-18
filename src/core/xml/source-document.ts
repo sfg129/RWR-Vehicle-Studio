@@ -108,6 +108,24 @@ export class SourceDocument {
 
   descendants(name: string): SourceNode[] { return this.nodes.filter((n) => n.name === name); }
   raw(node: SourceNode): string { return this.source.slice(node.start, node.endTagEnd); }
+  /** Node text including pending attribute changes, without mutating the working document history. */
+  currentRaw(node: SourceNode): string {
+    const replacements: { start: number; end: number; value: string }[] = [];
+    const visit = (n: SourceNode): void => {
+      for (const attr of n.attributes) {
+        const changed = this.changes.get(this.key(n, attr.name));
+        if (changed !== undefined) replacements.push({ start: attr.valueStart, end: attr.valueEnd, value: escapeXml(changed, attr.quote) });
+      }
+      for (const child of n.children) visit(child);
+    };
+    visit(node);
+    if (replacements.length === 0) return this.raw(node);
+    replacements.sort((a, b) => b.start - a.start);
+    let result = this.raw(node);
+    const offset = node.start;
+    for (const r of replacements) result = result.slice(0, r.start - offset) + r.value + result.slice(r.end - offset);
+    return result;
+  }
 
   private materialize(): void { if (this.dirty) this.commit(this.serialize()); }
 

@@ -63,7 +63,7 @@ function directComposition(document: SourceDocument): VehicleComposition {
 }
 
 function markedRaw(document: SourceDocument, node: SourceNode, marker: string): string {
-  const raw = document.raw(node);
+  const raw = document.currentRaw(node);
   const nameEnd = raw.search(/[\s/>]/);
   if (nameEnd < 0) return raw;
   return `${raw.slice(0, nameEnd)} ${ORIGIN_ATTRIBUTE}="${marker}"${raw.slice(nameEnd)}`;

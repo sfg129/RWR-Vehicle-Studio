@@ -144,6 +144,30 @@ describe('基础载具引用', () => {
   });
 });
 
+describe('基础载具组合（pending 属性）', () => {
+  it('组合 preview 包含 leaf 顶层节点的 pending 属性修改（RV-002）', () => {
+    const base = new SourceDocument('<vehicle><physics mass="1"/></vehicle>');
+    const leaf = new SourceDocument('<vehicle><physics mass="2"/></vehicle>');
+    leaf.set(leaf.descendants('physics')[0], 'mass', '3');
+    const composed = composeVehicle(base, leaf);
+    const previewPhysics = composed.document.descendants('physics')[0];
+    expect(composed.document.value(previewPhysics, 'mass')).toBe('3');
+    expect(composed.editableNode(previewPhysics)).toBe(leaf.descendants('physics')[0]);
+  });
+  it('组合 preview 包含 leaf 嵌套子节点的 pending 修改，且不污染 base/历史（RV-002）', () => {
+    const base = new SourceDocument('<vehicle><turret><visual offset="1 0 0"/></turret></vehicle>');
+    const leaf = new SourceDocument('<vehicle><turret><visual offset="1 0 0"/></turret></vehicle>');
+    const visual = leaf.descendants('visual')[0];
+    leaf.set(visual, 'offset', '9 9 9');
+    const composed = composeVehicle(base, leaf);
+    const previewVisual = composed.document.descendants('visual')[0];
+    expect(composed.document.value(previewVisual, 'offset')).toBe('9 9 9');
+    expect(composed.editableNode(previewVisual)).toBe(visual);
+    expect(leaf.raw(visual)).toBe('<visual offset="1 0 0"/>');
+    expect(leaf.serialize()).toBe('<vehicle><turret><visual offset="9 9 9"/></turret></vehicle>');
+  });
+});
+
 describe('乘员显示规则', () => {
   it('character_slot 的 hiding="1" 表示完全隐藏', () => {
     const doc = new SourceDocument('<vehicle><character_slot type="passenger" hiding="1"/><character_slot type="driver" hiding="0"/></vehicle>');
