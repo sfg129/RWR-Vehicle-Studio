@@ -28,7 +28,7 @@ RWR Vehicle Studio is an offline visual vehicle editor for _Running With Rifles_
 
 ## 下载
 
-每次推送到 `main` 都会由 CI 自动构建并发布到 [Releases](https://github.com/shiftz300/RWR-Vehicle-Studio/releases) 的滚动 **nightly** 预发布条目（每次提交覆盖刷新）：
+每次推送到 `main` 都会由 CI 自动构建并发布到 [Releases](https://github.com/sfg129/RWR-Vehicle-Studio/releases) 的滚动 **nightly** 预发布条目（每次提交覆盖刷新）：
 
 - Windows：NSIS 安装程序（`.exe`）；
 - macOS：磁盘映像（`.dmg`）；
@@ -64,4 +64,4 @@ bun run build
 
 _Running With Rifles_、其名称及游戏资源的权利归各自权利人所有。本项目与游戏开发商不存在从属关系；GPL-3.0 不会改变用户自行载入的第三方游戏或模组资源的许可。
 
-项目仓库：[shiftz300/RWR-Vehicle-Studio](https://github.com/shiftz300/RWR-Vehicle-Studio)
+项目仓库：[sfg129/RWR-Vehicle-Studio](https://github.com/sfg129/RWR-Vehicle-Studio)
