@@ -118,12 +118,53 @@ describe('资源覆盖重解析（RV-006）', () => {
       const catalog = new ResourceCatalog();
       catalog.indexes.weapon['gun.weapon'] = 'A/gun.weapon';
       const before = await catalog.weapon('gun.weapon');
-      expect(before?.sourcePath).toBe('A/gun.weapon');
-      expect(before?.shields[0].offset).toEqual([1, 1, 1]);
+      expect(before.ok).toBe(true); if (!before.ok) return;
+      expect(before.value.sourcePath).toBe('A/gun.weapon');
+      expect(before.value.shields[0].offset).toEqual([1, 1, 1]);
       catalog.override('B/gun.weapon');
       const after = await catalog.weapon('gun.weapon');
-      expect(after?.sourcePath).toBe('B/gun.weapon');
-      expect(after?.shields[0].offset).toEqual([2, 2, 2]);
+      expect(after.ok).toBe(true); if (!after.ok) return;
+      expect(after.value.sourcePath).toBe('B/gun.weapon');
+      expect(after.value.shields[0].offset).toEqual([2, 2, 2]);
+    } finally { readText.mockRestore(); }
+  });
+});
+
+describe('武器解析错误分类（RV-022）', () => {
+  it('缺失/读取失败/解析失败分别返回对应 kind', async () => {
+    const readText = vi.spyOn(desktop, 'readText').mockImplementation(async (path: string) => {
+      if (path === 'parse/gun.weapon') return '<weapon><model'; // 未闭合标签 -> 解析失败
+      if (path === 'ok/gun.weapon') return '<weapon><shield offset="0 0 0" extent="1 1 1"/></weapon>';
+      throw new Error('EACCES');
+    });
+    try {
+      const catalog = new ResourceCatalog();
+      // 缺失：index 里没有该 key
+      expect(await catalog.weapon('nope.weapon')).toMatchObject({ ok: false, kind: 'missing' });
+      // 读取失败：物理路径存在但 readText 抛错
+      catalog.indexes.weapon['gun.weapon'] = 'read/gun.weapon';
+      expect(await catalog.weapon('gun.weapon')).toMatchObject({ ok: false, kind: 'read_error' });
+      // 解析失败：文件存在但内容非法
+      catalog.indexes.weapon['gun.weapon'] = 'parse/gun.weapon';
+      expect(await catalog.weapon('gun.weapon')).toMatchObject({ ok: false, kind: 'parse_error' });
+      // 成功
+      catalog.indexes.weapon['gun.weapon'] = 'ok/gun.weapon';
+      expect(await catalog.weapon('gun.weapon')).toMatchObject({ ok: true, value: { sourcePath: 'ok/gun.weapon' } });
+    } finally { readText.mockRestore(); }
+  });
+  it('读取/解析失败不写入缓存，修复后重试可成功', async () => {
+    let failing = true;
+    const readText = vi.spyOn(desktop, 'readText').mockImplementation(async () => {
+      if (failing) throw new Error('EIO'); else return '<weapon><shield offset="1 2 3" extent="4 5 6"/></weapon>';
+    });
+    try {
+      const catalog = new ResourceCatalog();
+      catalog.indexes.weapon['gun.weapon'] = 'gun.weapon';
+      expect(await catalog.weapon('gun.weapon')).toMatchObject({ ok: false, kind: 'read_error' });
+      failing = false;
+      const retry = await catalog.weapon('gun.weapon');
+      expect(retry.ok).toBe(true); if (!retry.ok) return;
+      expect(retry.value.shields[0].offset).toEqual([1, 2, 3]);
     } finally { readText.mockRestore(); }
   });
 });
@@ -132,7 +173,7 @@ describe('资源目录事务（RV-011）', () => {
   it('applyFolders 任一目录扫描失败时保持旧状态不变', async () => {
     const scan = vi.spyOn(desktop, 'scanFolder').mockImplementation(async (path: string, kind: string) => {
       if (kind === 'weapon') throw new Error('weapon scan failed');
-      return { [`${kind}_file`]: `${path}/${kind}_file` };
+      return { index: { [`${kind}_file`]: `${path}/${kind}_file` }, duplicates: [], warnings: [] };
     });
     try {
       const catalog = new ResourceCatalog();
@@ -146,7 +187,7 @@ describe('资源目录事务（RV-011）', () => {
   });
 
   it('applyFolders 全部成功时原子提交，空目录得到空索引', async () => {
-    const scan = vi.spyOn(desktop, 'scanFolder').mockImplementation(async (path: string, kind: string) => ({ [`${kind}_file`]: `${path}/${kind}_file` }));
+    const scan = vi.spyOn(desktop, 'scanFolder').mockImplementation(async (path: string, kind: string) => ({ index: { [`${kind}_file`]: `${path}/${kind}_file` }, duplicates: [], warnings: [] }));
     try {
       const catalog = new ResourceCatalog();
       await catalog.applyFolders({ model: 'm', texture: 't', weapon: '' });
@@ -154,6 +195,30 @@ describe('资源目录事务（RV-011）', () => {
       expect(catalog.indexes.model).toEqual({ model_file: 'm/model_file' });
       expect(catalog.indexes.texture).toEqual({ texture_file: 't/texture_file' });
       expect(catalog.indexes.weapon).toEqual({});
+    } finally { scan.mockRestore(); }
+  });
+});
+
+describe('资源扫描诊断（RV-019 / RV-057）', () => {
+  it('applyFolders 聚合重复文件与扫描警告到 scanDiagnostics', async () => {
+    const scan = vi.spyOn(desktop, 'scanFolder').mockImplementation(async (path: string, kind: string) => {
+      if (kind === 'weapon') return { index: { 'gun.weapon': `${path}/gun.weapon` }, duplicates: ['gun.weapon 重复出现 2 次：a、b'], warnings: ['资源扫描跳过：权限不足'] };
+      return { index: {}, duplicates: [], warnings: [] };
+    });
+    try {
+      const catalog = new ResourceCatalog();
+      await catalog.applyFolders({ model: '', texture: '', weapon: 'w' });
+      expect(catalog.scanDiagnostics.duplicates).toEqual(['gun.weapon 重复出现 2 次：a、b']);
+      expect(catalog.scanDiagnostics.warnings).toEqual(['资源扫描跳过：权限不足']);
+      expect(catalog.indexes.weapon).toEqual({ 'gun.weapon': 'w/gun.weapon' });
+    } finally { scan.mockRestore(); }
+  });
+  it('空文件夹扫描不产生诊断', async () => {
+    const scan = vi.spyOn(desktop, 'scanFolder').mockResolvedValue({ index: {}, duplicates: [], warnings: [] });
+    try {
+      const catalog = new ResourceCatalog();
+      await catalog.applyFolders({ model: '', texture: '', weapon: '' });
+      expect(catalog.scanDiagnostics).toEqual({ duplicates: [], warnings: [] });
     } finally { scan.mockRestore(); }
   });
 });

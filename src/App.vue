@@ -36,7 +36,7 @@ const options = reactive({ showBroken: false, showOccupants: true, showBounds: t
 const savedWorkspace = loadWorkspacePreferences();
 const vehicleWorkspace = ref<VehicleWorkspace>(); const workspaceError = ref(''); const workspacePanelOpen = ref(savedWorkspace.panelOpen);
 const expandedWorkspacePaths = reactive(new Set<string>(savedWorkspace.expanded));
-const vehicleSchema = ref<VehicleSchema>({ objectTypes: [], attributes: {} }); const newObjectType = ref(''); const newAttribute = ref('');
+const vehicleSchema = ref<VehicleSchema>({ objectTypes: [], attributes: {}, skipped: [] }); const newObjectType = ref(''); const newAttribute = ref('');
 interface WeaponSession { key: string; path: string; name: string; document: SourceDocument; savedText: string; undoStack: string[] }
 const weaponSessions = new Map<string, WeaponSession>(); const weaponSession = ref<WeaponSession>(); const weaponLoadError = ref(''); const weaponRevision = ref(0); const weaponDirtyCount = ref(0);
 const lastEditedDoc = ref<'vehicle' | string>('vehicle');
@@ -144,17 +144,23 @@ function allowVehicleSwitch(): boolean {
 async function chooseVehicleWorkspace() {
   try {
     const chosen = await desktop.chooseVehicleWorkspace(); if (!chosen) return;
-    vehicleWorkspace.value = chosen; workspaceError.value = ''; expandedWorkspacePaths.clear(); workspacePanelOpen.value = true; persistVehicleWorkspace(); await refreshVehicleSchema(chosen.root);
+    vehicleWorkspace.value = chosen; workspaceError.value = ''; expandedWorkspacePaths.clear(); workspacePanelOpen.value = true; persistVehicleWorkspace();
     status.value = `载具工作区：${chosen.root}`;
+    await refreshVehicleSchema(chosen.root);
   } catch (error) { workspaceError.value = message(error); fail(error); }
 }
 async function restoreVehicleWorkspace() {
   if (!savedWorkspace.root) return;
-  try { vehicleWorkspace.value = await desktop.scanVehicleWorkspace(savedWorkspace.root); workspaceError.value = ''; await refreshVehicleSchema(savedWorkspace.root); }
-  catch (error) { workspaceError.value = message(error); status.value = `载具工作区不可用：${workspaceError.value}`; }
+  try { vehicleWorkspace.value = await desktop.scanVehicleWorkspace(savedWorkspace.root); workspaceError.value = ''; }
+  catch (error) { workspaceError.value = message(error); status.value = `载具工作区不可用：${workspaceError.value}`; return; }
+  await refreshVehicleSchema(savedWorkspace.root);
 }
 async function refreshVehicleSchema(root: string) {
-  vehicleSchema.value = await desktop.scanVehicleSchema(root); newObjectType.value = vehicleSchema.value.objectTypes[0] ?? ''; newAttribute.value = '';
+  try {
+    const schema = await desktop.scanVehicleSchema(root);
+    vehicleSchema.value = schema; newObjectType.value = schema.objectTypes[0] ?? ''; newAttribute.value = '';
+    if (schema.skipped.length) status.value = `载具结构扫描跳过 ${schema.skipped.length} 个无法解析的文件`;
+  } catch { /* schema 是辅助功能，失败不拖死文件浏览器 */ }
 }
 const collapsedGroups = reactive(new Set<string>());
 function toggleWorkspacePanel() { workspacePanelOpen.value = !workspacePanelOpen.value; persistVehicleWorkspace(); }
@@ -195,7 +201,9 @@ async function indexRememberedResources(selection: ResourceSelection, token: num
 }
 async function resourcesApplied(selection: ResourceSelection, token = ++vehicleLoadToken) {
   rememberedSelection = cloneResourceSelection(selection); supportModel.value = selection.supportModel; supportAnimations.value = selection.supportAnimations;
-  resourceDialog.value = false; await loadSoldier(token); if (token !== vehicleLoadToken) return; await validate(); if (token !== vehicleLoadToken) return; revision.value++; await loadSelectedWeaponEditor(); status.value = `已载入：${entries.value.filter((e) => e.kind === 'visual').length} 个外观，${entries.value.filter((e) => e.kind === 'slot').length} 个乘员位`;
+  resourceDialog.value = false; await loadSoldier(token); if (token !== vehicleLoadToken) return; await validate(); if (token !== vehicleLoadToken) return; revision.value++; await loadSelectedWeaponEditor();
+  const diagnostics = catalog.scanDiagnostics; const total = diagnostics.duplicates.length + diagnostics.warnings.length;
+  status.value = `已载入：${entries.value.filter((e) => e.kind === 'visual').length} 个外观，${entries.value.filter((e) => e.kind === 'slot').length} 个乘员位${total ? `；资源扫描发现 ${total} 个问题` : ''}`;
 }
 async function loadSoldier(token = ++vehicleLoadToken) {
   if (!supportModel.value || !supportAnimations.value) { soldier.value = undefined; return; }
@@ -215,8 +223,9 @@ async function loadSelectedWeaponEditor() {
   if (!key) { weaponSession.value = undefined; return; }
   weaponSession.value = undefined;
   try {
-    const weapon = await catalog.weapon(key); if (token !== weaponLoadToken) return;
-    if (!weapon) { weaponSession.value = undefined; weaponLoadError.value = `未找到武器文件：${key}`; return; }
+    const weaponResult = await catalog.weapon(key); if (token !== weaponLoadToken) return;
+    if (!weaponResult.ok) { weaponSession.value = undefined; weaponLoadError.value = weaponResult.message; return; }
+    const weapon = weaponResult.value;
     const sessionKey = weapon.sourcePath.toLowerCase(); let session = weaponSessions.get(sessionKey);
     if (!session) {
       const text = await desktop.readText(weapon.sourcePath); if (token !== weaponLoadToken) return;
@@ -276,7 +285,15 @@ async function reloadWeaponShields() {
     catalog.setWeaponPreview(session.key, session.path, text); weaponRevision.value++; updateWeaponDirtyCount(); revision.value++; status.value = `已重新载入武器：${session.name}`;
   } catch (error) { fail(error); }
 }
-async function validate() { if (previewDocument.value) missing.value = await catalog.missing(previewDocument.value); }
+async function validate() {
+  if (!previewDocument.value) return;
+  const diagnostics = catalog.scanDiagnostics;
+  missing.value = [
+    ...(await catalog.missing(previewDocument.value)),
+    ...diagnostics.duplicates.map((item) => `重复资源：${item}`),
+    ...diagnostics.warnings.map((item) => `扫描警告：${item}`),
+  ];
+}
 const RESOURCE_ATTRS = new Set(['mesh_filename', 'texture_filename', 'weapon_key']);
 let validateTimer: number | undefined;
 function scheduleValidate() {

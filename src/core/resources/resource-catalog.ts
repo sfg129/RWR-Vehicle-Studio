@@ -1,10 +1,14 @@
-import { desktop, type ResourceKind } from '../../platform/desktop-api';
+import { desktop, type ResourceFolderScan, type ResourceKind } from '../../platform/desktop-api';
 import { SourceDocument } from '../xml/source-document';
 import { vec3, type Vec3 } from '../math';
+
+const EMPTY_SCAN = (): ResourceFolderScan => ({ index: {}, duplicates: [], warnings: [] });
 
 export interface FolderSettings { model: string; texture: string; weapon: string }
 export interface WeaponShield { offset: Vec3; extent: Vec3 }
 export interface WeaponModel { sourcePath: string; mesh?: string; voxelModel?: string; texture?: string; shields: WeaponShield[] }
+export type ResourceFailureKind = 'missing' | 'read_error' | 'parse_error';
+export type ResourceResult<T> = { ok: true; value: T } | { ok: false; kind: ResourceFailureKind; message: string };
 
 export function parseWeaponDefinition(source: string, sourcePath: string): WeaponModel {
   const xml = new SourceDocument(source); const model = xml.descendants('model')[0];
@@ -19,22 +23,34 @@ export class ResourceCatalog {
   folders: FolderSettings = { model: '', texture: '', weapon: '' };
   indexes: Record<ResourceKind, Record<string, string>> = { model: {}, texture: {}, weapon: {} };
   overrides: Record<string, string> = {};
-  private weaponCache = new Map<string, WeaponModel | null>();
+  private weaponCache = new Map<string, ResourceResult<WeaponModel>>();
+  private scans: Record<ResourceKind, ResourceFolderScan> = { model: EMPTY_SCAN(), texture: EMPTY_SCAN(), weapon: EMPTY_SCAN() };
+
+  /** Non-fatal diagnostics from the last folder scan, aggregated across the three kinds. */
+  get scanDiagnostics(): { duplicates: string[]; warnings: string[] } {
+    const kinds = ['model', 'texture', 'weapon'] as ResourceKind[];
+    return { duplicates: kinds.flatMap((kind) => this.scans[kind].duplicates), warnings: kinds.flatMap((kind) => this.scans[kind].warnings) };
+  }
 
   async setFolder(kind: ResourceKind, folder: string): Promise<void> {
-    const index = folder ? await desktop.scanFolder(folder, kind) : {};
+    const scan = folder ? await desktop.scanFolder(folder, kind) : EMPTY_SCAN();
     this.folders[kind] = folder;
-    this.indexes[kind] = index;
+    this.indexes[kind] = scan.index;
+    this.scans[kind] = scan;
     this.weaponCache.clear();
   }
   /** Scan all three folders first, then commit atomically; a failed scan leaves the catalog untouched. */
   async applyFolders(folders: FolderSettings): Promise<void> {
     const indexes: Record<ResourceKind, Record<string, string>> = { model: {}, texture: {}, weapon: {} };
+    const scans: Record<ResourceKind, ResourceFolderScan> = { model: EMPTY_SCAN(), texture: EMPTY_SCAN(), weapon: EMPTY_SCAN() };
     for (const kind of ['model', 'texture', 'weapon'] as ResourceKind[]) {
-      indexes[kind] = folders[kind] ? await desktop.scanFolder(folders[kind], kind) : {};
+      const scan = folders[kind] ? await desktop.scanFolder(folders[kind], kind) : EMPTY_SCAN();
+      indexes[kind] = scan.index;
+      scans[kind] = scan;
     }
     this.folders = { ...folders };
     this.indexes = indexes;
+    this.scans = scans;
     this.weaponCache.clear();
   }
   override(path: string): void { this.overrides[fileName(path).toLowerCase()] = path; this.weaponCache.clear(); }
@@ -43,19 +59,23 @@ export class ResourceCatalog {
     const key = fileName(name).toLowerCase();
     return this.overrides[key] ?? this.indexes[kind][key];
   }
-  async weapon(key: string | undefined): Promise<WeaponModel | null> {
-    if (!key) return null;
+  async weapon(key: string | undefined): Promise<ResourceResult<WeaponModel>> {
+    if (!key) return { ok: false, kind: 'missing', message: '未指定武器' };
     const cacheKey = key.toLowerCase();
     if (this.weaponCache.has(cacheKey)) return this.weaponCache.get(cacheKey)!;
     const sourcePath = this.resolve(key, 'weapon');
-    if (!sourcePath) { this.weaponCache.set(cacheKey, null); return null; }
+    if (!sourcePath) { const result = fail('missing', `未找到武器：${key}`); this.weaponCache.set(cacheKey, result); return result; }
+    let source: string;
+    try { source = await desktop.readText(sourcePath); }
+    catch (e) { return fail('read_error', `读取武器文件失败：${sourcePath}（${describe(e)}）`); }
     try {
-      const source = await desktop.readText(sourcePath); const result = parseWeaponDefinition(source, sourcePath);
+      const value = parseWeaponDefinition(source, sourcePath);
+      const result: ResourceResult<WeaponModel> = { ok: true, value };
       this.weaponCache.set(cacheKey, result); return result;
-    } catch { this.weaponCache.set(cacheKey, null); return null; }
+    } catch (e) { return fail('parse_error', `解析武器文件失败：${sourcePath}（${describe(e)}）`); }
   }
   setWeaponPreview(key: string, sourcePath: string, source: string): WeaponModel {
-    const result = parseWeaponDefinition(source, sourcePath); this.weaponCache.set(key.toLowerCase(), result); return result;
+    const result = parseWeaponDefinition(source, sourcePath); this.weaponCache.set(key.toLowerCase(), { ok: true, value: result }); return result;
   }
   async missing(document: SourceDocument): Promise<string[]> {
     const missing = new Set<string>();
@@ -69,8 +89,10 @@ export class ResourceCatalog {
     for (const node of document.descendants('turret')) {
       if (node.parent?.name !== 'vehicle') continue;
       const key = document.value(node, 'weapon_key'); if (!key) continue;
-      const weapon = await this.weapon(key); if (!weapon) missing.add(`武器：${key}`);
+      const result = await this.weapon(key);
+      if (!result.ok) missing.add(result.kind === 'missing' ? `武器：${key}` : `武器：${key}（${result.kind === 'read_error' ? '读取失败' : '解析失败'}）`);
       else {
+        const weapon = result.value;
         if (weapon.mesh?.toLowerCase().endsWith('.mesh') && !this.resolve(weapon.mesh, 'model')) missing.add(`武器模型：${weapon.mesh}`);
         if (weapon.voxelModel && !this.resolve(weapon.voxelModel, 'model')) missing.add(`武器体素模型：${weapon.voxelModel}`);
         if (weapon.texture && !this.resolve(weapon.texture, 'texture')) missing.add(`武器纹理：${weapon.texture}`);
@@ -79,4 +101,6 @@ export class ResourceCatalog {
     return [...missing].sort();
   }
 }
+function fail(kind: ResourceFailureKind, message: string): { ok: false; kind: ResourceFailureKind; message: string } { return { ok: false, kind, message }; }
+function describe(e: unknown): string { return e instanceof Error ? e.message : String(e); }
 function fileName(path: string): string { return path.replaceAll('\\', '/').split('/').at(-1) ?? path; }

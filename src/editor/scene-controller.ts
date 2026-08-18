@@ -97,7 +97,7 @@ export class SceneController {
   sideView(): void { this.camera.position.set(28, 4, 0); this.controls.target.set(0, 1.5, 0); this.controls.update(); }
 
   private async addWeapon(turret: SourceNode, index: number, global: Vec3, generation: number): Promise<void> {
-    if (!this.doc || !this.catalog) return; const a = this.doc.attrs(turret); const weapon = await this.catalog.weapon(a.weapon_key); if (generation !== this.sceneGeneration || !weapon) return;
+    if (!this.doc || !this.catalog) return; const a = this.doc.attrs(turret); const weaponResult = await this.catalog.weapon(a.weapon_key); if (generation !== this.sceneGeneration || !weaponResult.ok) return; const weapon = weaponResult.value;
     try {
       const pose = turretWorldPose(this.doc, this.doc.root?.children.filter((n) => n.name === 'turret') ?? [], index);
       if (!pose) return;

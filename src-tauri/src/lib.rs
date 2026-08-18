@@ -31,7 +31,11 @@ struct VehicleWorkspace { root: String, entries: Vec<VehicleWorkspaceEntry> }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct VehicleSchema { object_types: Vec<String>, attributes: BTreeMap<String, Vec<String>> }
+struct VehicleSchema { object_types: Vec<String>, attributes: BTreeMap<String, Vec<String>>, skipped: Vec<String> }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceFolderScan { index: HashMap<String, String>, duplicates: Vec<String>, warnings: Vec<String> }
 
 fn local_path(value: FilePath) -> Result<PathBuf, String> {
     value.into_path().map_err(|_| "只支持本地文件系统路径".to_string())
@@ -120,17 +124,21 @@ fn scan_vehicle_schema(path: String) -> Result<VehicleSchema, String> {
     if !root.is_dir() { return Err("载具工作区路径不是文件夹".into()) }
     let mut object_types = BTreeSet::new();
     let mut attributes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut skipped = Vec::new();
     let mut count = 0usize;
     for entry in WalkDir::new(root).max_depth(13).follow_links(false).into_iter().filter_map(Result::ok) {
         if !entry.file_type().is_file() || !entry.path().extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("vehicle")) { continue }
         count += 1; if count > 10_000 { return Err("载具文件超过 10000 个；请选择更具体的工作区".into()) }
-        let text = decode_text(fs::read(entry.path()).map_err(|e| format!("读取载具结构失败：{e}"))?)?;
-        scan_xml_schema(&text, &mut object_types, &mut attributes);
+        match fs::read(entry.path()).map_err(|e| e.to_string()).and_then(decode_text) {
+            Ok(text) => scan_xml_schema(&text, &mut object_types, &mut attributes),
+            Err(_) => skipped.push(display(entry.path())),
+        }
     }
     attributes.remove("vehicle");
     Ok(VehicleSchema {
         object_types: object_types.into_iter().collect(),
         attributes: attributes.into_iter().map(|(name, values)| (name, values.into_iter().collect())).collect(),
+        skipped,
     })
 }
 
@@ -183,12 +191,15 @@ fn scan_workspace_entries(path: &Path, depth: usize, count: &mut usize) -> Resul
     });
     let mut result = Vec::with_capacity(paths.len());
     for child in paths {
-        *count += 1;
-        if *count > 10_000 { return Err("载具工作区项目超过 10000 个；请选择更具体的文件夹".into()) }
         let metadata = match fs::symlink_metadata(&child) { Ok(value) => value, Err(_) => continue };
         if metadata.file_type().is_symlink() { continue }
         let is_directory = metadata.is_dir();
         let is_vehicle = metadata.is_file() && child.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("vehicle"));
+        // Only .vehicle files are edited; supporting assets (meshes/textures/weapons) must not consume the safety budget.
+        if is_vehicle {
+            *count += 1;
+            if *count > 10_000 { return Err("载具文件超过 10000 个；请选择更具体的工作区".into()) }
+        }
         let children = if is_directory { scan_workspace_entries(&child, depth + 1, count)? } else { Vec::new() };
         result.push(VehicleWorkspaceEntry { name: file_name(&child), path: display(&child), is_directory, is_vehicle, children });
     }
@@ -217,7 +228,7 @@ async fn choose_support_file(app: AppHandle, kind: String) -> Result<Option<Stri
 }
 
 #[tauri::command]
-fn scan_resource_folder(path: String, kind: String) -> Result<HashMap<String, String>, String> {
+fn scan_resource_folder(path: String, kind: String) -> Result<ResourceFolderScan, String> {
     let root = PathBuf::from(path);
     if !root.is_dir() { return Err("所选资源文件夹不存在".into()) }
     let extensions: &[&str] = match kind.as_str() {
@@ -226,16 +237,28 @@ fn scan_resource_folder(path: String, kind: String) -> Result<HashMap<String, St
         "weapon" => &["weapon"],
         _ => return Err("未知资源类型".into()),
     };
-    let mut result = HashMap::new();
-    for entry in WalkDir::new(root).follow_links(false).into_iter().filter_map(Result::ok) {
+    let mut index = HashMap::new();
+    let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
+    let mut warnings = Vec::new();
+    for entry in WalkDir::new(root).follow_links(false) {
+        let entry = match entry { Ok(value) => value, Err(e) => { warnings.push(format!("资源扫描跳过：{e}")); continue } };
         if !entry.file_type().is_file() { continue }
         let p = entry.path();
         let ext = p.extension().and_then(|v| v.to_str()).unwrap_or("");
         if extensions.iter().any(|v| ext.eq_ignore_ascii_case(v)) {
-            result.entry(file_name(p).to_ascii_lowercase()).or_insert_with(|| display(p));
+            let name = file_name(p).to_ascii_lowercase();
+            by_name.entry(name.clone()).or_default().push(display(p));
+            index.entry(name).or_insert_with(|| display(p));
         }
     }
-    Ok(result)
+    let mut duplicates: Vec<String> = by_name.into_iter().filter_map(|(name, mut paths)| {
+        if paths.len() <= 1 { return None }
+        paths.sort();
+        Some(format!("{name} 重复出现 {} 次：{}", paths.len(), paths.join("、")))
+    }).collect();
+    duplicates.sort();
+    warnings.sort();
+    Ok(ResourceFolderScan { index, duplicates, warnings })
 }
 
 #[tauri::command]
@@ -350,6 +373,53 @@ mod tests {
         assert!(attributes["visual"].contains("class"));
         assert!(attributes["part"].contains("texture_filename"));
         assert!(attributes["turret"].contains("weapon_key"));
+    }
+
+    #[test]
+    fn schema_scan_skips_undecodable_files() {
+        let unique = format!("rwrstudio-schema-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let dir = std::env::temp_dir().join(&unique);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("good.vehicle"), "<vehicle><turret weapon_key=\"x\"/></vehicle>").unwrap();
+        fs::write(dir.join("bad.vehicle"), [0xFFu8, 0xFE, 0x00, 0xFF]).unwrap();
+        fs::write(dir.join("note.txt"), "ignored").unwrap();
+        let schema = scan_vehicle_schema(display(&dir)).expect("无法解析的文件应被跳过而非整体失败");
+        assert!(schema.object_types.contains(&"turret".to_string()));
+        assert_eq!(schema.skipped.len(), 1);
+        assert!(schema.skipped[0].ends_with("bad.vehicle"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resource_scan_reports_duplicate_basenames() {
+        let unique = format!("rwrstudio-scan-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let dir = std::env::temp_dir().join(&unique);
+        fs::create_dir_all(dir.join("a")).unwrap();
+        fs::create_dir_all(dir.join("b")).unwrap();
+        fs::write(dir.join("a/gun.weapon"), "a").unwrap();
+        fs::write(dir.join("b/gun.weapon"), "b").unwrap();
+        fs::write(dir.join("a/rifle.weapon"), "r").unwrap();
+        let scan = scan_resource_folder(display(&dir), "weapon".into()).unwrap();
+        assert_eq!(scan.index.len(), 2);
+        assert!(scan.index.contains_key("gun.weapon") && scan.index.contains_key("rifle.weapon"));
+        assert_eq!(scan.duplicates.len(), 1);
+        assert!(scan.duplicates[0].contains("gun.weapon") && scan.duplicates[0].contains("2 次"));
+        assert!(scan.warnings.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workspace_limit_counts_only_vehicle_files() {
+        let unique = format!("rwrstudio-ws-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let dir = std::env::temp_dir().join(&unique);
+        fs::create_dir_all(&dir).unwrap();
+        // 10001 non-.vehicle files would previously trip the 10000-entry guard; they must not count.
+        for i in 0..10_001 { fs::write(dir.join(format!("asset{i}.mesh")), "").unwrap(); }
+        fs::write(dir.join("tank.vehicle"), "<vehicle/>").unwrap();
+        let workspace = scan_vehicle_workspace(display(&dir)).expect("非 .vehicle 文件不应触发 10000 上限");
+        assert_eq!(workspace.entries.len(), 10_002);
+        assert!(workspace.entries.iter().any(|e| e.name == "tank.vehicle" && e.is_vehicle));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
