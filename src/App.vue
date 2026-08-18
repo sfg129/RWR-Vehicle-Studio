@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import EditorViewport from './components/EditorViewport.vue';
 import ResourceDialog from './components/ResourceDialog.vue';
 import OverrideDialog from './components/OverrideDialog.vue';
-import { desktop, type OpenedFile, type ResourceKind, type VehicleSchema, type VehicleWorkspace, type VehicleWorkspaceEntry } from './platform/desktop-api';
+import { desktop, type OpenedFile, type VehicleSchema, type VehicleWorkspace, type VehicleWorkspaceEntry } from './platform/desktop-api';
 import { SourceDocument, type SourceNode } from './core/xml/source-document';
 import { ResourceCatalog } from './core/resources/resource-catalog';
 import { sceneEntries, type SceneEntry } from './core/vehicle/vehicle-model';
@@ -21,6 +21,7 @@ import {
 import { flattenWorkspace, loadWorkspacePreferences, saveWorkspacePreferences } from './core/workspace/vehicle-workspace';
 
 const preferences = loadResourcePreferences();
+const hasRememberedResources = preferences.lastSelection !== undefined;
 let rememberedSelection = cloneResourceSelection(preferences.lastSelection ?? DEFAULT_RESOURCE_SELECTION);
 const opened = ref<OpenedFile>(); const document = ref<SourceDocument>(); const previewDocument = ref<SourceDocument>(); const catalog = new ResourceCatalog();
 let composition: VehicleComposition | undefined;
@@ -38,6 +39,8 @@ const expandedWorkspacePaths = reactive(new Set<string>(savedWorkspace.expanded)
 const vehicleSchema = ref<VehicleSchema>({ objectTypes: [], attributes: {} }); const newObjectType = ref(''); const newAttribute = ref('');
 interface WeaponSession { key: string; path: string; name: string; document: SourceDocument; savedText: string; undoStack: string[] }
 const weaponSessions = new Map<string, WeaponSession>(); const weaponSession = ref<WeaponSession>(); const weaponLoadError = ref(''); const weaponRevision = ref(0); const weaponDirtyCount = ref(0);
+const lastEditedDoc = ref<'vehicle' | string>('vehicle');
+const saving = ref(false);
 
 const groups = computed(() => {
   const labels: Record<string, string> = { physics: '基础 / 碰撞', control: '操控', tire: '轮组', turret: '炮塔与武器', visual: '外观模型', slot: '乘员位置', other: '其它对象' };
@@ -55,7 +58,14 @@ const weaponDirty = computed(() => { void weaponRevision.value; return !!weaponS
 const anyDirty = computed(() => dirty.value || weaponDirtyCount.value > 0);
 const dirtyWeaponSessions = computed(() => { void weaponRevision.value; return [...weaponSessions.values()].filter((session) => session.document.serialize() !== session.savedText); });
 const weaponShields = computed(() => { void weaponRevision.value; const session = weaponSession.value; if (!session) return []; return session.document.descendants('shield').map((node, index) => ({ node, index, offset: session.document.value(node, 'offset') ?? '', extent: session.document.value(node, 'extent') ?? '' })); });
-const canUndo = computed(() => undoStack.value.length > 0);
+const canUndo = computed(() => {
+  void weaponRevision.value;
+  if (lastEditedDoc.value !== 'vehicle') {
+    const session = weaponSessions.get(lastEditedDoc.value.toLowerCase());
+    if (session && session.undoStack.length) return true;
+  }
+  return undoStack.value.length > 0;
+});
 const selectedEditable = computed(() => !!selected.value && !!composition?.editableNode(selected.value.node));
 const workspaceRows = computed(() => flattenWorkspace(vehicleWorkspace.value?.entries ?? [], expandedWorkspacePaths));
 const availableAttributes = computed(() => {
@@ -79,7 +89,7 @@ async function loadOpenedVehicle(file: OpenedFile) {
   await resolveAutomaticBase(token);
   if (token !== vehicleLoadToken) return;
   rebuildPreview(false);
-  if (Object.values(rememberedSelection.folders).every(Boolean)) {
+  if (hasRememberedResources) {
     status.value = `已打开 ${file.name}；正在载入上次使用的资源预设…`;
     await indexRememberedResources(rememberedSelection, token);
   } else {
@@ -177,7 +187,7 @@ async function activateWorkspaceEntry(entry: VehicleWorkspaceEntry) {
 }
 async function indexRememberedResources(selection: ResourceSelection, token: number) {
   try {
-    for (const kind of ['model', 'texture', 'weapon'] as ResourceKind[]) { await catalog.setFolder(kind, selection.folders[kind]); if (token !== vehicleLoadToken) return; }
+    await catalog.applyFolders({ ...selection.folders }); if (token !== vehicleLoadToken) return;
     await resourcesApplied(selection, token);
   } catch (error) {
     if (token === vehicleLoadToken) { status.value = `上次使用的资源路径不可用：${message(error)}`; resourceDialog.value = true; }
@@ -233,8 +243,13 @@ function deleteShield(node: SourceNode) {
   const session = weaponSession.value; if (!session) return;
   recordWeaponUndo(session); session.document.removeNode(node); refreshWeaponPreview(); status.value = `已从 ${session.name} 删除 shield（尚未保存）`;
 }
-async function saveWeaponShields() { if (weaponSession.value) await saveWeaponSession(weaponSession.value); }
+async function saveWeaponShields() { if (!weaponSession.value || saving.value) return; saving.value = true; try { await saveWeaponSession(weaponSession.value); } finally { saving.value = false; } }
+async function saveOneWeapon(session: WeaponSession) { if (saving.value) return; saving.value = true; try { await saveWeaponSession(session); } finally { saving.value = false; } }
 async function saveWeaponSession(session: WeaponSession) {
+  try {
+    const disk = await desktop.readText(session.path);
+    if (disk !== session.savedText && !confirm('该武器文件已被其它程序修改，仍要用当前内容覆盖吗？')) return;
+  } catch { /* 文件暂不可读（如被移动）时按可覆盖处理 */ }
   try {
     const text = session.document.serialize(); const saved = await desktop.saveWeapon(session.path, text); session.savedText = text; session.document.commit(text);
     catalog.setWeaponPreview(session.key, session.path, text); weaponRevision.value++; updateWeaponDirtyCount(); revision.value++;
@@ -246,7 +261,13 @@ function discardWeaponSession(session: WeaponSession) {
   catalog.setWeaponPreview(session.key, session.path, session.document.serialize()); weaponRevision.value++; updateWeaponDirtyCount(); revision.value++;
   status.value = `已放弃 ${session.name} 的未保存修改`;
 }
-function saveAllWeapons() { for (const session of [...weaponSessions.values()]) if (session.document.serialize() !== session.savedText) void saveWeaponSession(session); }
+async function saveAllWeapons() {
+  if (saving.value) return;
+  saving.value = true;
+  try {
+    for (const session of [...weaponSessions.values()]) if (session.document.serialize() !== session.savedText) await saveWeaponSession(session);
+  } finally { saving.value = false; }
+}
 function discardAllWeapons() { for (const session of [...weaponSessions.values()]) discardWeaponSession(session); }
 async function reloadWeaponShields() {
   const session = weaponSession.value; if (!session || weaponDirty.value && !confirm('未保存的护盾修改将丢失，仍要从磁盘重新载入武器吗？')) return;
@@ -256,22 +277,27 @@ async function reloadWeaponShields() {
   } catch (error) { fail(error); }
 }
 async function validate() { if (previewDocument.value) missing.value = await catalog.missing(previewDocument.value); }
+const RESOURCE_ATTRS = new Set(['mesh_filename', 'texture_filename', 'weapon_key']);
+let validateTimer: number | undefined;
+function scheduleValidate() {
+  if (validateTimer !== undefined) window.clearTimeout(validateTimer);
+  validateTimer = window.setTimeout(() => { void validate(); }, 300);
+}
 function select(id: number) { selectedId.value = id; }
-let lastEditedDoc: 'vehicle' | 'weapon' = 'vehicle';
-function recordUndo() { lastEditedDoc = 'vehicle'; if (!document.value) return; const snapshot = document.value.serialize(); if (undoStack.value.at(-1) !== snapshot) undoStack.value = [...undoStack.value.slice(-99), snapshot]; }
+function recordUndo() { lastEditedDoc.value = 'vehicle'; if (!document.value) return; const snapshot = document.value.serialize(); if (undoStack.value.at(-1) !== snapshot) undoStack.value = [...undoStack.value.slice(-99), snapshot]; }
 function recordWeaponUndo(session: WeaponSession) {
-  lastEditedDoc = 'weapon'; const snapshot = session.document.serialize();
+  lastEditedDoc.value = session.path; const snapshot = session.document.serialize();
   if (session.undoStack.at(-1) !== snapshot) session.undoStack = [...session.undoStack.slice(-99), snapshot];
 }
 function undoWeapon(session: WeaponSession) {
   const previous = session.undoStack.at(-1); if (!previous) return;
-  session.undoStack = session.undoStack.slice(0, -1); session.document = new SourceDocument(previous);
+  session.undoStack = session.undoStack.slice(0, -1); session.document = new SourceDocument(previous); session.document.restoreSaved(session.savedText);
   catalog.setWeaponPreview(session.key, session.path, session.document.serialize()); weaponRevision.value++; updateWeaponDirtyCount(); revision.value++; status.value = `已撤销武器修改：${session.name}`;
 }
 function edit(field: { sourceNode?: SourceNode; attr: string }, event: Event) {
   if (!document.value || !field.sourceNode) { status.value = '该属性继承自基础载具；请打开基础文件后编辑'; return; }
   const value = (event.target as HTMLInputElement).value; if (document.value.value(field.sourceNode, field.attr) === value) return;
-  recordUndo(); document.value.set(field.sourceNode, field.attr, value); rebuildPreview();
+  recordUndo(); document.value.set(field.sourceNode, field.attr, value); rebuildPreview(); if (RESOURCE_ATTRS.has(field.attr)) scheduleValidate();
 }
 function move(node: SourceNode, attr: string, value: [number, number, number]) {
   if (!document.value) return; const sourceNode = composition?.editableNode(node);
@@ -282,45 +308,52 @@ function move(node: SourceNode, attr: string, value: [number, number, number]) {
 function revert() {
   if (!document.value || !selected.value) return; const sourceNode = composition?.editableNode(selected.value.node);
   if (!sourceNode) { status.value = '继承项不能在覆盖文件中恢复；请打开基础文件'; return; }
-  recordUndo(); document.value.revertNode(sourceNode); rebuildPreview();
+  recordUndo(); document.value.revertNode(sourceNode); rebuildPreview(); scheduleValidate();
 }
 function addEmptyObject() {
   if (!document.value?.root || !newObjectType.value) return;
-  recordUndo(); document.value.appendChild(document.value.root, newObjectType.value); rebuildPreview(false);
+  recordUndo(); document.value.appendChild(document.value.root, newObjectType.value); rebuildPreview(false); scheduleValidate();
   const added = [...entries.value].reverse().find((entry) => entry.node.name === newObjectType.value && !composition?.inherited(entry.node));
   selectedId.value = added?.node.id; status.value = `已增加空对象 <${newObjectType.value} />`;
 }
 function deleteSelectedObject() {
   if (!document.value || !selected.value) return; const sourceNode = composition?.editableNode(selected.value.node);
   if (!sourceNode) { status.value = '继承自基础载具的对象不能在覆盖文件中删除'; return; }
-  recordUndo(); const name = sourceNode.name; document.value.removeNode(sourceNode); rebuildPreview(false); status.value = `已删除对象 <${name}>；可用 Ctrl+Z 恢复`;
+  recordUndo(); const name = sourceNode.name; document.value.removeNode(sourceNode); rebuildPreview(false); status.value = `已删除对象 <${name}>；可用 Ctrl+Z 恢复`; scheduleValidate();
 }
 function addSelectedAttribute() {
   if (!document.value || !selected.value || !newAttribute.value) return; const sourceNode = composition?.editableNode(selected.value.node);
   if (!sourceNode) { status.value = '继承自基础载具的对象不能在覆盖文件中增加属性'; return; }
-  recordUndo(); const name = newAttribute.value; document.value.addAttribute(sourceNode, name, '0'); rebuildPreview(); newAttribute.value = ''; status.value = `已加入属性 ${name}`;
+  recordUndo(); const name = newAttribute.value; document.value.addAttribute(sourceNode, name, '0'); rebuildPreview(); newAttribute.value = ''; status.value = `已加入属性 ${name}`; if (RESOURCE_ATTRS.has(name)) scheduleValidate();
 }
 function deleteAttribute(field: { sourceNode?: SourceNode; attr: string }) {
   if (!document.value || !field.sourceNode) { status.value = '继承属性不能在覆盖文件中删除'; return; }
-  recordUndo(); const name = field.attr; document.value.removeAttribute(field.sourceNode, name); rebuildPreview(); status.value = `已删除属性 ${name}；可用 Ctrl+Z 恢复`;
+  recordUndo(); const name = field.attr; document.value.removeAttribute(field.sourceNode, name); rebuildPreview(); status.value = `已删除属性 ${name}；可用 Ctrl+Z 恢复`; if (RESOURCE_ATTRS.has(name)) scheduleValidate();
 }
 function undo() {
-  if (lastEditedDoc === 'weapon' && weaponSession.value && weaponSession.value.undoStack.length) { undoWeapon(weaponSession.value); return; }
+  if (lastEditedDoc.value !== 'vehicle') {
+    const session = weaponSessions.get(lastEditedDoc.value.toLowerCase());
+    if (session && session.undoStack.length) { undoWeapon(session); return; }
+  }
   const previous = undoStack.value.at(-1); if (!previous) return;
-  undoStack.value = undoStack.value.slice(0, -1); document.value = new SourceDocument(previous); rebuildPreview(); status.value = '已撤销上一次修改';
+  undoStack.value = undoStack.value.slice(0, -1); document.value = new SourceDocument(previous); document.value.restoreSaved(savedText.value); rebuildPreview(); scheduleValidate(); status.value = '已撤销上一次修改';
 }
 async function save(saveAs = false) {
-  if (!document.value || !opened.value) return;
-  if (!saveAs) {
-    try {
-      const disk = await desktop.readText(opened.value.path);
-      if (disk !== savedText.value && !confirm('该文件已被其它程序修改，仍要用当前内容覆盖吗？')) return;
-    } catch { /* 文件暂不可读（如被移动）时按可覆盖处理 */ }
+  if (!document.value || !opened.value || saving.value) return;
+  saving.value = true;
+  try {
+    if (!saveAs) {
+      try {
+        const disk = await desktop.readText(opened.value.path);
+        if (disk !== savedText.value && !confirm('该文件已被其它程序修改，仍要用当前内容覆盖吗？')) return;
+      } catch { /* 文件暂不可读（如被移动）时按可覆盖处理 */ }
+    }
+    const text = document.value.serialize(); const wasAutomaticBase = baseAutomatic.value; const saved = await desktop.saveVehicle(opened.value.path, text, saveAs); if (!saved) return; opened.value = { name: saved.name, path: saved.path, text }; savedText.value = text; document.value.commit(text); document.value.markSaved(); if (saveAs && wasAutomaticBase) await resolveAutomaticBase(); rebuildPreview(); status.value = saved.backupPath ? `已保存；备份：${saved.backupPath}` : `已保存：${saved.path}`;
   }
-  try { const text = document.value.serialize(); const wasAutomaticBase = baseAutomatic.value; const saved = await desktop.saveVehicle(opened.value.path, text, saveAs); if (!saved) return; opened.value = { name: saved.name, path: saved.path, text }; savedText.value = text; document.value.commit(text); document.value.markSaved(); if (saveAs && wasAutomaticBase) await resolveAutomaticBase(); rebuildPreview(); status.value = saved.backupPath ? `已保存；备份：${saved.backupPath}` : `已保存：${saved.path}`; }
   catch (e) { fail(e); }
+  finally { saving.value = false; }
 }
-async function reload() { if (!opened.value || anyDirty.value && !confirm('未保存修改将丢失，仍要重新载入吗？')) return; try { const text = await desktop.readText(opened.value.path); document.value = new SourceDocument(text); savedText.value = text; undoStack.value = []; if (baseAutomatic.value || !baseOpened.value) await resolveAutomaticBase(); rebuildPreview(); status.value = '已从磁盘重新载入'; } catch (e) { fail(e); } }
+async function reload() { if (!opened.value || anyDirty.value && !confirm('未保存修改将丢失，仍要重新载入吗？')) return; try { const text = await desktop.readText(opened.value.path); document.value = new SourceDocument(text); savedText.value = text; undoStack.value = []; if (baseAutomatic.value || !baseOpened.value) await resolveAutomaticBase(); rebuildPreview(); scheduleValidate(); status.value = '已从磁盘重新载入'; } catch (e) { fail(e); } }
 async function overrideChanged() { await validate(); revision.value++; await loadSelectedWeaponEditor(); }
 function fail(e: unknown) { status.value = `错误：${message(e)}`; }
 function message(e: unknown) { return e instanceof Error ? e.message : String(e); }
@@ -340,16 +373,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keydown));
       <div class="brand"><strong>RWR VEHICLE STUDIO</strong><small>0.2.3 PREVIEW</small></div>
       <nav>
         <button @click="openVehicle">打开载具</button><button @click="resourceDialog = true">资源文件夹</button><button @click="overrideDialog = true">文件覆盖</button>
-        <span class="divider"></span><button :disabled="!canUndo" title="Ctrl+Z" @click="undo">撤销</button><button :disabled="!document" class="primary" @click="save(false)">保存</button><button :disabled="!document" @click="save(true)">另存为</button><button :disabled="!document" @click="reload">重新载入</button>
+        <span class="divider"></span><button :disabled="!canUndo" title="Ctrl+Z" @click="undo">撤销</button><button :disabled="!document || saving" class="primary" @click="save(false)">保存</button><button :disabled="!document || saving" @click="save(true)">另存为</button><button :disabled="!document" @click="reload">重新载入</button>
       </nav>
       <div class="file-badge" :class="{ active: opened }"><b class="ellipsis">{{ opened?.name ?? '未打开文件' }}</b><span>{{ anyDirty ? `未保存：${dirty ? '载具' : ''}${dirty && weaponDirtyCount ? '、' : ''}${weaponDirtyCount ? `${weaponDirtyCount} 个武器` : ''}` : '磁盘同步' }}</span></div>
       <details v-if="dirtyWeaponSessions.length" class="unsaved-weapons">
         <summary>未保存武器 {{ dirtyWeaponSessions.length }}</summary>
         <div class="unsaved-weapons-list">
-          <div class="unsaved-weapons-toolbar"><button class="small primary" @click="saveAllWeapons">全部保存</button><button class="small" @click="discardAllWeapons">全部放弃</button></div>
+          <div class="unsaved-weapons-toolbar"><button class="small primary" :disabled="saving" @click="saveAllWeapons">全部保存</button><button class="small" @click="discardAllWeapons">全部放弃</button></div>
           <article v-for="session in dirtyWeaponSessions" :key="session.path">
             <b class="ellipsis">{{ session.name }}</b><span class="ellipsis" :title="session.path">{{ session.path }}</span>
-            <div><button class="small" @click="saveWeaponSession(session)">保存</button><button class="small" @click="discardWeaponSession(session)">放弃</button></div>
+            <div><button class="small" :disabled="saving" @click="saveOneWeapon(session)">保存</button><button class="small" @click="discardWeaponSession(session)">放弃</button></div>
           </article>
         </div>
       </details>
@@ -432,11 +465,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keydown));
               <label class="field-row"><span>offset</span><input :value="shield.offset" @change="editShield(shield.node, 'offset', $event)" /></label>
               <label class="field-row"><span>extent</span><input :value="shield.extent" @change="editShield(shield.node, 'extent', $event)" /></label>
             </article>
-            <div class="weapon-actions"><button class="small" @click="addShield">增加 shield</button><button class="small" @click="reloadWeaponShields">重新载入</button><button class="small primary" :disabled="!weaponDirty" @click="saveWeaponShields">保存武器护盾</button></div>
+            <div class="weapon-actions"><button class="small" @click="addShield">增加 shield</button><button class="small" @click="reloadWeaponShields">重新载入</button><button class="small primary" :disabled="!weaponDirty || saving" @click="saveWeaponShields">保存武器护盾</button></div>
           </template>
         </section>
         <div v-if="selected" class="attribute-add-row"><select v-model="newAttribute" :disabled="!selectedEditable || !availableAttributes.length"><option disabled value="">选择可加入的数值类</option><option v-for="name in availableAttributes" :key="name" :value="name">{{ name }}</option></select><button class="small" :disabled="!newAttribute || !selectedEditable" @click="addSelectedAttribute">加入新数值类</button></div>
-        <div class="inspector-actions"><button class="small danger" :disabled="!selectedEditable" @click="deleteSelectedObject">删除对象</button><button class="small" :disabled="!selectedEditable" @click="revert">恢复本项</button><button class="small primary" :disabled="!document" @click="save(false)">保存载具</button></div>
+        <div class="inspector-actions"><button class="small danger" :disabled="!selectedEditable" @click="deleteSelectedObject">删除对象</button><button class="small" :disabled="!selectedEditable" @click="revert">恢复本项</button><button class="small primary" :disabled="!document || saving" @click="save(false)">保存载具</button></div>
       </aside>
     </section>
 

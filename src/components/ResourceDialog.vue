@@ -28,10 +28,12 @@ const selectedPreset = computed(() => presets.value.find((preset) => preset.id =
 async function choose(kind: ResourceKind) { const path = await desktop.chooseFolder(); if (path) folders[kind] = path; }
 async function support(kind: 'model' | 'animation') { const path = await desktop.chooseSupportFile(kind); if (path) (kind === 'model' ? model : animations).value = path; }
 function currentSelection(): ResourceSelection { return { folders: { ...folders }, supportModel: model.value, supportAnimations: animations.value }; }
+function persistPresets(activePresetId = preferences.activePresetId) {
+  saveResourcePreferences({ presets: presets.value, activePresetId, lastSelection: preferences.lastSelection });
+}
 function loadPreset() {
   const preset = selectedPreset.value; if (!preset) return;
   Object.assign(folders, preset.folders); model.value = preset.supportModel; animations.value = preset.supportAnimations; presetName.value = preset.name;
-  saveResourcePreferences({ presets: presets.value, activePresetId: preset.id, lastSelection: cloneResourceSelection(preset) });
 }
 function savePreset() {
   const name = presetName.value.trim(); if (!name) { busy.value = '请先填写预设名称'; return; }
@@ -39,19 +41,19 @@ function savePreset() {
   const saved: ResourcePreset = { id: existing?.id ?? presetId(), name, ...cloneResourceSelection(currentSelection()) };
   presets.value = existing ? presets.value.map((preset) => preset.id === existing.id ? saved : preset) : [...presets.value, saved];
   selectedPresetId.value = saved.id; busy.value = `已保存预设“${name}”`;
-  saveResourcePreferences({ presets: presets.value, activePresetId: saved.id, lastSelection: cloneResourceSelection(saved) });
+  persistPresets(saved.id);
 }
 function removePreset() {
   const preset = selectedPreset.value; if (!preset || !confirm(`删除资源预设“${preset.name}”？`)) return;
   presets.value = presets.value.filter((item) => item.id !== preset.id); selectedPresetId.value = ''; presetName.value = ''; busy.value = '已删除预设';
-  saveResourcePreferences({ presets: presets.value, activePresetId: '', lastSelection: currentSelection() });
+  persistPresets('');
 }
 function restoreSupport(kind: 'model' | 'animation') { if (kind === 'model') model.value = BUILTIN_SUPPORT_MODEL; else animations.value = BUILTIN_SUPPORT_ANIMATIONS; }
 function supportLabel(path: string, kind: 'model' | 'animation'): string { return isBuiltinSupport(path) ? `内置：${kind === 'model' ? 'Normandy Ranger 人物模型' : 'RWR 人物动画'}` : path; }
 async function apply() {
   indexing.value = true; busy.value = '正在递归建立资源索引…';
   try {
-    for (const kind of ['model', 'texture', 'weapon'] as ResourceKind[]) await props.catalog.setFolder(kind, folders[kind]);
+    await props.catalog.applyFolders({ ...folders });
     const selection = currentSelection();
     saveResourcePreferences({ presets: presets.value, activePresetId: selectedPresetId.value, lastSelection: cloneResourceSelection(selection) });
     emit('apply', selection);

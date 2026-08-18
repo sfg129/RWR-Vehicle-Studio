@@ -22,8 +22,19 @@ export class ResourceCatalog {
   private weaponCache = new Map<string, WeaponModel | null>();
 
   async setFolder(kind: ResourceKind, folder: string): Promise<void> {
+    const index = folder ? await desktop.scanFolder(folder, kind) : {};
     this.folders[kind] = folder;
-    this.indexes[kind] = folder ? await desktop.scanFolder(folder, kind) : {};
+    this.indexes[kind] = index;
+    this.weaponCache.clear();
+  }
+  /** Scan all three folders first, then commit atomically; a failed scan leaves the catalog untouched. */
+  async applyFolders(folders: FolderSettings): Promise<void> {
+    const indexes: Record<ResourceKind, Record<string, string>> = { model: {}, texture: {}, weapon: {} };
+    for (const kind of ['model', 'texture', 'weapon'] as ResourceKind[]) {
+      indexes[kind] = folders[kind] ? await desktop.scanFolder(folders[kind], kind) : {};
+    }
+    this.folders = { ...folders };
+    this.indexes = indexes;
     this.weaponCache.clear();
   }
   override(path: string): void { this.overrides[fileName(path).toLowerCase()] = path; this.weaponCache.clear(); }

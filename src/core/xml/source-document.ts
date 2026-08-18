@@ -53,6 +53,8 @@ export class SourceDocument {
   }
   /** Mark the current working text as the saved snapshot (call after a successful save). */
   markSaved(): void { this.saved = this.source; }
+  /** Override the saved snapshot (e.g. after rebuilding the document from an undo snapshot). */
+  restoreSaved(snapshot: string): void { this.saved = snapshot; }
   /** Restore this node's subtree to the saved snapshot, preserving pending edits on other nodes. */
   revertNode(node: SourceNode): void {
     const savedDoc = new SourceDocument(this.saved);

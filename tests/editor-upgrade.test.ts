@@ -41,6 +41,17 @@ describe('恢复本项（RV-009）', () => {
     expect(document.value(document.descendants('visual')[0], 'offset')).toBe('1 0 0');
     expect(document.value(document.descendants('turret')[0], 'offset')).toBe('5 0 0');
   });
+  it('restoreSaved 后 revertNode 恢复到真实保存快照而非 undo 快照', () => {
+    const saved = '<vehicle><visual offset="1 0 0"/></vehicle>';
+    const document = new SourceDocument(saved);
+    document.set(document.descendants('visual')[0], 'offset', '9 9 9');
+    document.appendChild(document.root!, 'turret');
+    const undoSnapshot = document.serialize();
+    const undone = new SourceDocument(undoSnapshot);
+    undone.restoreSaved(saved);
+    undone.revertNode(undone.descendants('visual')[0]);
+    expect(undone.value(undone.descendants('visual')[0], 'offset')).toBe('1 0 0');
+  });
 });
 
 describe('武器预览资源', () => {
@@ -114,5 +125,35 @@ describe('资源覆盖重解析（RV-006）', () => {
       expect(after?.sourcePath).toBe('B/gun.weapon');
       expect(after?.shields[0].offset).toEqual([2, 2, 2]);
     } finally { readText.mockRestore(); }
+  });
+});
+
+describe('资源目录事务（RV-011）', () => {
+  it('applyFolders 任一目录扫描失败时保持旧状态不变', async () => {
+    const scan = vi.spyOn(desktop, 'scanFolder').mockImplementation(async (path: string, kind: string) => {
+      if (kind === 'weapon') throw new Error('weapon scan failed');
+      return { [`${kind}_file`]: `${path}/${kind}_file` };
+    });
+    try {
+      const catalog = new ResourceCatalog();
+      catalog.folders = { model: 'old-model', texture: 'old-texture', weapon: 'old-weapon' };
+      catalog.indexes = { model: { a: 'old-a' }, texture: { b: 'old-b' }, weapon: { c: 'old-c' } };
+      await expect(catalog.applyFolders({ model: 'm', texture: 't', weapon: 'w' })).rejects.toThrow('weapon scan failed');
+      expect(catalog.folders).toEqual({ model: 'old-model', texture: 'old-texture', weapon: 'old-weapon' });
+      expect(catalog.indexes.model).toEqual({ a: 'old-a' });
+      expect(catalog.indexes.weapon).toEqual({ c: 'old-c' });
+    } finally { scan.mockRestore(); }
+  });
+
+  it('applyFolders 全部成功时原子提交，空目录得到空索引', async () => {
+    const scan = vi.spyOn(desktop, 'scanFolder').mockImplementation(async (path: string, kind: string) => ({ [`${kind}_file`]: `${path}/${kind}_file` }));
+    try {
+      const catalog = new ResourceCatalog();
+      await catalog.applyFolders({ model: 'm', texture: 't', weapon: '' });
+      expect(catalog.folders).toEqual({ model: 'm', texture: 't', weapon: '' });
+      expect(catalog.indexes.model).toEqual({ model_file: 'm/model_file' });
+      expect(catalog.indexes.texture).toEqual({ texture_file: 't/texture_file' });
+      expect(catalog.indexes.weapon).toEqual({});
+    } finally { scan.mockRestore(); }
   });
 });

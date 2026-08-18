@@ -320,23 +320,11 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         file.write_all(bytes).map_err(|e| format!("写入临时文件失败：{e}"))?;
         file.sync_all().map_err(|e| format!("同步临时文件失败：{e}"))?;
         drop(file);
-        replace_file(&temp, path)?;
+        fs::rename(&temp, path).map_err(|e| format!("原子替换文件失败：{e}"))?;
         Ok(())
     })();
     if result.is_err() { let _ = fs::remove_file(&temp); }
     result
-}
-
-#[cfg(not(windows))]
-fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
-    fs::rename(from, to).map_err(|e| format!("原子替换文件失败：{e}"))
-}
-#[cfg(windows)]
-fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
-    // std::fs::rename cannot overwrite an existing destination on Windows;
-    // the backup captured above preserves the previous content.
-    if to.exists() { fs::remove_file(to).map_err(|e| format!("替换文件失败：{e}"))?; }
-    fs::rename(from, to).map_err(|e| format!("替换文件失败：{e}"))
 }
 
 fn decode_text(mut bytes: Vec<u8>) -> Result<String, String> {
