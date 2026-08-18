@@ -33,23 +33,37 @@ export class ResourceCatalog {
   }
 
   async setFolder(kind: ResourceKind, folder: string): Promise<void> {
+    if (folder === this.folders[kind]) return; // same-path fast path (RV-014)
     const scan = folder ? await desktop.scanFolder(folder, kind) : EMPTY_SCAN();
     this.folders[kind] = folder;
     this.indexes[kind] = scan.index;
     this.scans[kind] = scan;
     this.weaponCache.clear();
   }
-  /** Scan all three folders first, then commit atomically; a failed scan leaves the catalog untouched. */
-  async applyFolders(folders: FolderSettings): Promise<void> {
+  /** Scan all three folders first, then commit atomically; a failed scan leaves the catalog untouched. Unchanged paths are reused (RV-014). */
+  async applyFolders(folders: FolderSettings, force = false): Promise<void> {
     const indexes: Record<ResourceKind, Record<string, string>> = { model: {}, texture: {}, weapon: {} };
     const scans: Record<ResourceKind, ResourceFolderScan> = { model: EMPTY_SCAN(), texture: EMPTY_SCAN(), weapon: EMPTY_SCAN() };
+    let changed = false;
     for (const kind of ['model', 'texture', 'weapon'] as ResourceKind[]) {
+      if (!force && folders[kind] === this.folders[kind]) { indexes[kind] = this.indexes[kind]; scans[kind] = this.scans[kind]; continue; }
       const scan = folders[kind] ? await desktop.scanFolder(folders[kind], kind) : EMPTY_SCAN();
       indexes[kind] = scan.index;
       scans[kind] = scan;
+      changed = true;
     }
     this.folders = { ...folders };
     this.indexes = indexes;
+    this.scans = scans;
+    if (changed) this.weaponCache.clear();
+  }
+  /** Re-scan the currently configured folders (explicit refresh, bypasses the same-path fast path). */
+  async refreshFolders(): Promise<void> {
+    const scans: Record<ResourceKind, ResourceFolderScan> = { model: EMPTY_SCAN(), texture: EMPTY_SCAN(), weapon: EMPTY_SCAN() };
+    for (const kind of ['model', 'texture', 'weapon'] as ResourceKind[]) {
+      scans[kind] = this.folders[kind] ? await desktop.scanFolder(this.folders[kind], kind) : EMPTY_SCAN();
+    }
+    this.indexes = { model: scans.model.index, texture: scans.texture.index, weapon: scans.weapon.index };
     this.scans = scans;
     this.weaponCache.clear();
   }

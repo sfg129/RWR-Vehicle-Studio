@@ -53,7 +53,7 @@ function supportLabel(path: string, kind: 'model' | 'animation'): string { retur
 async function apply() {
   indexing.value = true; busy.value = '正在递归建立资源索引…';
   try {
-    await props.catalog.applyFolders({ ...folders });
+    await props.catalog.applyFolders({ ...folders }, true);
     const selection = currentSelection();
     saveResourcePreferences({ presets: presets.value, activePresetId: selectedPresetId.value, lastSelection: cloneResourceSelection(selection) });
     emit('apply', selection);

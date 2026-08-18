@@ -1,4 +1,3 @@
-use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Serialize;
 use std::{collections::{BTreeMap, BTreeSet, HashMap, HashSet}, fs, path::{Path, PathBuf}, sync::Mutex};
 use tauri::{AppHandle, Manager, State};
@@ -176,13 +175,12 @@ fn scan_xml_schema(text: &str, object_types: &mut BTreeSet<String>, attributes: 
 fn build_vehicle_workspace(path: PathBuf) -> Result<VehicleWorkspace, String> {
     let root = path.canonicalize().map_err(|e| format!("无法恢复载具工作区：{e}"))?;
     if !root.is_dir() { return Err("载具工作区路径不是文件夹".into()) }
-    let mut count = 0usize;
-    let entries = scan_workspace_entries(&root, 0, &mut count)?;
+    let entries = list_dir_entries(&root)?;
     Ok(VehicleWorkspace { root: display(&root), entries })
 }
 
-fn scan_workspace_entries(path: &Path, depth: usize, count: &mut usize) -> Result<Vec<VehicleWorkspaceEntry>, String> {
-    if depth > 12 { return Ok(Vec::new()) }
+/// List a single directory's immediate children (no recursion); children are populated lazily by the frontend (RV-016).
+fn list_dir_entries(path: &Path) -> Result<Vec<VehicleWorkspaceEntry>, String> {
     let mut paths = fs::read_dir(path).map_err(|e| format!("无法读取工作区目录 {}：{e}", display(path)))?
         .filter_map(Result::ok).map(|entry| entry.path()).collect::<Vec<_>>();
     paths.sort_by(|a, b| {
@@ -195,15 +193,16 @@ fn scan_workspace_entries(path: &Path, depth: usize, count: &mut usize) -> Resul
         if metadata.file_type().is_symlink() { continue }
         let is_directory = metadata.is_dir();
         let is_vehicle = metadata.is_file() && child.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("vehicle"));
-        // Only .vehicle files are edited; supporting assets (meshes/textures/weapons) must not consume the safety budget.
-        if is_vehicle {
-            *count += 1;
-            if *count > 10_000 { return Err("载具文件超过 10000 个；请选择更具体的工作区".into()) }
-        }
-        let children = if is_directory { scan_workspace_entries(&child, depth + 1, count)? } else { Vec::new() };
-        result.push(VehicleWorkspaceEntry { name: file_name(&child), path: display(&child), is_directory, is_vehicle, children });
+        result.push(VehicleWorkspaceEntry { name: file_name(&child), path: display(&child), is_directory, is_vehicle, children: Vec::new() });
     }
     Ok(result)
+}
+
+#[tauri::command]
+fn list_workspace_dir(path: String) -> Result<Vec<VehicleWorkspaceEntry>, String> {
+    let dir = PathBuf::from(path).canonicalize().map_err(|e| format!("无法恢复目录：{e}"))?;
+    if !dir.is_dir() { return Err("路径不是文件夹".into()) }
+    list_dir_entries(&dir)
 }
 
 #[tauri::command]
@@ -276,9 +275,9 @@ fn read_builtin_support(kind: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn read_binary_base64(path: String) -> Result<String, String> {
+fn read_binary(path: String) -> Result<tauri::ipc::Response, String> {
     let bytes = fs::read(&path).map_err(|e| format!("读取二进制资源失败：{e}"))?;
-    Ok(STANDARD.encode(bytes))
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[tauri::command]
@@ -409,16 +408,36 @@ mod tests {
     }
 
     #[test]
-    fn workspace_limit_counts_only_vehicle_files() {
+    fn workspace_scan_lists_top_level_without_vehicle_limit() {
         let unique = format!("rwrstudio-ws-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
         let dir = std::env::temp_dir().join(&unique);
         fs::create_dir_all(&dir).unwrap();
-        // 10001 non-.vehicle files would previously trip the 10000-entry guard; they must not count.
+        // A flat directory with many non-.vehicle files must not fail the (now lazy) workspace listing.
         for i in 0..10_001 { fs::write(dir.join(format!("asset{i}.mesh")), "").unwrap(); }
         fs::write(dir.join("tank.vehicle"), "<vehicle/>").unwrap();
-        let workspace = scan_vehicle_workspace(display(&dir)).expect("非 .vehicle 文件不应触发 10000 上限");
+        let workspace = scan_vehicle_workspace(display(&dir)).expect("非 .vehicle 文件不应让工作区列举失败");
         assert_eq!(workspace.entries.len(), 10_002);
         assert!(workspace.entries.iter().any(|e| e.name == "tank.vehicle" && e.is_vehicle));
+        assert!(workspace.entries.iter().all(|e| e.children.is_empty()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_workspace_dir_returns_immediate_children_only() {
+        let unique = format!("rwrstudio-list-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let dir = std::env::temp_dir().join(&unique);
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("a.vehicle"), "<vehicle/>").unwrap();
+        fs::write(dir.join("readme.txt"), "x").unwrap();
+        fs::write(dir.join("sub/inner.vehicle"), "<vehicle/>").unwrap();
+        let entries = list_workspace_dir(display(&dir)).expect("应能列举单个目录");
+        let names = entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>();
+        assert_eq!(names, vec!["sub", "a.vehicle", "readme.txt"]);
+        assert!(entries.iter().all(|e| e.children.is_empty()));
+        let vehicle = entries.iter().find(|e| e.name == "a.vehicle").unwrap();
+        assert!(vehicle.is_vehicle && !vehicle.is_directory);
+        let sub = entries.iter().find(|e| e.name == "sub").unwrap();
+        assert!(sub.is_directory && !sub.is_vehicle);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -465,9 +484,9 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![open_vehicle, open_vehicle_path, resolve_vehicle_base, choose_vehicle_base, choose_vehicle_workspace, scan_vehicle_workspace, scan_vehicle_schema,
+        .invoke_handler(tauri::generate_handler![open_vehicle, open_vehicle_path, resolve_vehicle_base, choose_vehicle_base, choose_vehicle_workspace, scan_vehicle_workspace, scan_vehicle_schema, list_workspace_dir,
             choose_folder, choose_override_file, choose_support_file,
-            scan_resource_folder, read_text_path, read_builtin_support, read_binary_base64, save_vehicle, save_weapon])
+            scan_resource_folder, read_text_path, read_builtin_support, read_binary, save_vehicle, save_weapon])
         .run(tauri::generate_context!())
         .expect("RWR Vehicle Studio failed to start");
 }

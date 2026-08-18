@@ -3,8 +3,10 @@ import { existsSync, readFileSync } from 'node:fs';
 import { SourceDocument } from '../src/core/xml/source-document';
 import { parseWeaponDefinition, ResourceCatalog } from '../src/core/resources/resource-catalog';
 import { parseStaticVoxelModel } from '../src/core/voxel/voxel-model';
-import { visualMatchesDamageState, weaponExtentToModel, weaponLogicalToModel, WEAPON_LOGICAL_TO_MODEL_YAW } from '../src/core/vehicle/vehicle-model';
+import { localDragValue, visualMatchesDamageState, weaponExtentToModel, weaponLogicalToModel, WEAPON_LOGICAL_TO_MODEL_YAW } from '../src/core/vehicle/vehicle-model';
 import { desktop } from '../src/platform/desktop-api';
+import { SoldierAssets } from '../src/core/soldier/soldier-assets';
+import { loadSoldierAssets } from '../src/core/soldier/soldier-loader';
 
 describe('结构编辑', () => {
   it('增加/删除对象和属性并保留可解析 XML', () => {
@@ -220,5 +222,69 @@ describe('资源扫描诊断（RV-019 / RV-057）', () => {
       await catalog.applyFolders({ model: '', texture: '', weapon: '' });
       expect(catalog.scanDiagnostics).toEqual({ duplicates: [], warnings: [] });
     } finally { scan.mockRestore(); }
+  });
+});
+
+describe('资源目录 same-path 快路径（RV-014）', () => {
+  it('路径未变时 applyFolders 不再重扫；force=true 或 refreshFolders 强制重扫', async () => {
+    let calls = 0;
+    const scan = vi.spyOn(desktop, 'scanFolder').mockImplementation(async (path: string) => { calls++; return { index: { [`${path}-file`]: path }, duplicates: [], warnings: [] }; });
+    try {
+      const catalog = new ResourceCatalog();
+      await catalog.applyFolders({ model: 'm', texture: 't', weapon: 'w' });
+      expect(calls).toBe(3);
+      // 相同路径再次应用 -> 不重扫
+      await catalog.applyFolders({ model: 'm', texture: 't', weapon: 'w' });
+      expect(calls).toBe(3);
+      expect(catalog.indexes.model).toEqual({ 'm-file': 'm' });
+      // force=true 强制重扫
+      await catalog.applyFolders({ model: 'm', texture: 't', weapon: 'w' }, true);
+      expect(calls).toBe(6);
+      // 显式 refreshFolders 也重扫
+      await catalog.refreshFolders();
+      expect(calls).toBe(9);
+      // 只改变 model 路径 -> 仅重扫 model，其余复用
+      await catalog.applyFolders({ model: 'm2', texture: 't', weapon: 'w' });
+      expect(calls).toBe(10);
+      expect(catalog.indexes.model).toEqual({ 'm2-file': 'm2' });
+      expect(catalog.indexes.texture).toEqual({ 't-file': 't' });
+    } finally { scan.mockRestore(); }
+  });
+});
+
+describe('人物资源身份缓存（RV-015）', () => {
+  it('相同 model+animation 身份只读取解析一次', async () => {
+    const readText = vi.spyOn(desktop, 'readText').mockResolvedValue('<model/>');
+    const parse = vi.spyOn(SoldierAssets, 'parse');
+    try {
+      const first = await loadSoldierAssets('cache-model.xml', 'cache-anim.xml');
+      const second = await loadSoldierAssets('cache-model.xml', 'cache-anim.xml');
+      expect(first).toBe(second);
+      expect(readText).toHaveBeenCalledTimes(2);
+      expect(parse).toHaveBeenCalledTimes(1);
+    } finally { readText.mockRestore(); parse.mockRestore(); }
+  });
+  it('读取失败被驱逐，下次重试可成功', async () => {
+    let fail = true;
+    const readText = vi.spyOn(desktop, 'readText').mockImplementation(async () => { if (fail) throw new Error('EIO'); return '<model/>'; });
+    try {
+      await expect(loadSoldierAssets('retry-model.xml', 'retry-anim.xml')).rejects.toThrow('EIO');
+      fail = false;
+      await expect(loadSoldierAssets('retry-model.xml', 'retry-anim.xml')).resolves.toBeInstanceOf(SoldierAssets);
+    } finally { readText.mockRestore(); }
+  });
+});
+
+describe('局部拖拽增量写回（RV-025）', () => {
+  it('world delta 按 basis 逆旋转叠加到当前 local 值', () => {
+    // basis 90°：world +X -> local +Z
+    const a = localDragValue([1, 0, 0], Math.PI / 2, [10, 20, 30]);
+    expect(a[0]).toBeCloseTo(10); expect(a[1]).toBeCloseTo(20); expect(a[2]).toBeCloseTo(31);
+    // basis -90°：world +X -> local -Z
+    const b = localDragValue([1, 0, 0], -Math.PI / 2, [10, 20, 30]);
+    expect(b[0]).toBeCloseTo(10); expect(b[1]).toBeCloseTo(20); expect(b[2]).toBeCloseTo(29);
+    // basis 0：world delta 直接叠加
+    const c = localDragValue([1, 2, 3], 0, [0, 0, 0]);
+    expect(c[0]).toBeCloseTo(1); expect(c[1]).toBeCloseTo(2); expect(c[2]).toBeCloseTo(3);
   });
 });

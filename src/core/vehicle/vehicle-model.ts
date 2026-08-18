@@ -132,6 +132,12 @@ export function rotateY(value: Vec3, angle: number): Vec3 {
   return [cosine * value[0] + sine * value[2], value[1], -sine * value[0] + cosine * value[2]];
 }
 
+/** Convert a world-space gizmo drag delta into the new local attribute value (world -> local via inverse basis Y rotation). */
+export function localDragValue(worldDelta: Vec3, basisRotation: number, current: Vec3): Vec3 {
+  const local = rotateY(worldDelta, -basisRotation);
+  return [current[0] + local[0], current[1] + local[1], current[2] + local[2]];
+}
+
 /** RWR weapon collision data is X-forward, while OGRE weapon models are Z-forward. */
 export const WEAPON_LOGICAL_TO_MODEL_YAW = -Math.PI / 2;
 export function weaponLogicalToModel(value: Vec3): Vec3 { return rotateY(value, WEAPON_LOGICAL_TO_MODEL_YAW); }

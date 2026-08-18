@@ -9,6 +9,7 @@ import { ResourceCatalog } from './core/resources/resource-catalog';
 import { sceneEntries, type SceneEntry } from './core/vehicle/vehicle-model';
 import { composeVehicle, vehicleBaseReference, type VehicleComposition } from './core/vehicle/vehicle-composition';
 import { SoldierAssets } from './core/soldier/soldier-assets';
+import { loadSoldierAssets } from './core/soldier/soldier-loader';
 import { vec3Text } from './core/math';
 import {
   BUILTIN_SUPPORT_ANIMATIONS,
@@ -36,6 +37,7 @@ const options = reactive({ showBroken: false, showOccupants: true, showBounds: t
 const savedWorkspace = loadWorkspacePreferences();
 const vehicleWorkspace = ref<VehicleWorkspace>(); const workspaceError = ref(''); const workspacePanelOpen = ref(savedWorkspace.panelOpen);
 const expandedWorkspacePaths = reactive(new Set<string>(savedWorkspace.expanded));
+const loadedWorkspaceDirs = new Set<string>();
 const vehicleSchema = ref<VehicleSchema>({ objectTypes: [], attributes: {}, skipped: [] }); const newObjectType = ref(''); const newAttribute = ref('');
 interface WeaponSession { key: string; path: string; name: string; document: SourceDocument; savedText: string; undoStack: string[] }
 const weaponSessions = new Map<string, WeaponSession>(); const weaponSession = ref<WeaponSession>(); const weaponLoadError = ref(''); const weaponRevision = ref(0); const weaponDirtyCount = ref(0);
@@ -128,30 +130,47 @@ async function openBaseVehicle() {
   try { await loadOpenedVehicle(await desktop.openVehiclePath(baseOpened.value.path)); }
   catch (error) { fail(error); }
 }
-function rebuildPreview(preserveSelection = true) {
-  if (!document.value) { previewDocument.value = undefined; composition = undefined; entries.value = []; selectedId.value = undefined; revision.value++; return; }
+function recomputePreview(preserveSelection = true) {
+  if (!document.value) { previewDocument.value = undefined; composition = undefined; entries.value = []; selectedId.value = undefined; return; }
   const previous = preserveSelection ? selected.value : undefined;
   const identity = previous ? { kind: previous.kind, index: previous.index } : undefined;
   composition = composeVehicle(baseDocument.value, document.value); previewDocument.value = composition.document; entries.value = sceneEntries(composition.document);
   selectedId.value = (identity ? entries.value.find((entry) => entry.kind === identity.kind && entry.index === identity.index) : entries.value[0])?.node.id;
-  revision.value++;
 }
+function rebuildPreview(preserveSelection = true) { recomputePreview(preserveSelection); revision.value++; }
 function allowVehicleSwitch(): boolean {
   if (!anyDirty.value) return true;
   const parts = [dirty.value ? '载具' : '', weaponDirtyCount.value ? `${weaponDirtyCount.value} 个武器` : ''].filter(Boolean);
   return confirm(`有未保存修改（${parts.join('、')}），仍要打开另一辆载具吗？`);
 }
+async function loadWorkspaceChildren(entry: VehicleWorkspaceEntry): Promise<void> {
+  if (!entry.isDirectory || loadedWorkspaceDirs.has(entry.path)) return;
+  loadedWorkspaceDirs.add(entry.path);
+  try { entry.children = await desktop.listWorkspaceDir(entry.path); }
+  catch { /* 单个目录不可读时保持空，不拖垮整棵工作区 */ }
+}
+async function loadExpandedWorkspaceChildren(entries: VehicleWorkspaceEntry[]): Promise<void> {
+  for (const entry of entries) {
+    if (entry.isDirectory && expandedWorkspacePaths.has(entry.path)) {
+      await loadWorkspaceChildren(entry);
+      await loadExpandedWorkspaceChildren(entry.children);
+    }
+  }
+}
 async function chooseVehicleWorkspace() {
   try {
     const chosen = await desktop.chooseVehicleWorkspace(); if (!chosen) return;
-    vehicleWorkspace.value = chosen; workspaceError.value = ''; expandedWorkspacePaths.clear(); workspacePanelOpen.value = true; persistVehicleWorkspace();
+    vehicleWorkspace.value = chosen; workspaceError.value = ''; expandedWorkspacePaths.clear(); loadedWorkspaceDirs.clear(); workspacePanelOpen.value = true; persistVehicleWorkspace();
     status.value = `载具工作区：${chosen.root}`;
     await refreshVehicleSchema(chosen.root);
   } catch (error) { workspaceError.value = message(error); fail(error); }
 }
 async function restoreVehicleWorkspace() {
   if (!savedWorkspace.root) return;
-  try { vehicleWorkspace.value = await desktop.scanVehicleWorkspace(savedWorkspace.root); workspaceError.value = ''; }
+  try {
+    vehicleWorkspace.value = await desktop.scanVehicleWorkspace(savedWorkspace.root); workspaceError.value = '';
+    loadedWorkspaceDirs.clear(); await loadExpandedWorkspaceChildren(vehicleWorkspace.value.entries);
+  }
   catch (error) { workspaceError.value = message(error); status.value = `载具工作区不可用：${workspaceError.value}`; return; }
   await refreshVehicleSchema(savedWorkspace.root);
 }
@@ -183,7 +202,9 @@ function onCollapseLeave(el: Element, done: () => void) {
 function persistVehicleWorkspace() { saveWorkspacePreferences({ root: vehicleWorkspace.value?.root ?? savedWorkspace.root, expanded: [...expandedWorkspacePaths], panelOpen: workspacePanelOpen.value }); }
 async function activateWorkspaceEntry(entry: VehicleWorkspaceEntry) {
   if (entry.isDirectory) {
-    if (expandedWorkspacePaths.has(entry.path)) expandedWorkspacePaths.delete(entry.path); else expandedWorkspacePaths.add(entry.path);
+    const expanding = !expandedWorkspacePaths.has(entry.path);
+    if (expanding) expandedWorkspacePaths.add(entry.path); else expandedWorkspacePaths.delete(entry.path);
+    if (expanding) await loadWorkspaceChildren(entry);
     persistVehicleWorkspace(); return;
   }
   if (!entry.isVehicle) { const warning = `“${entry.name}”不是 .vehicle 载具文件`; status.value = warning; alert(warning); return; }
@@ -208,12 +229,9 @@ async function resourcesApplied(selection: ResourceSelection, token = ++vehicleL
 async function loadSoldier(token = ++vehicleLoadToken) {
   if (!supportModel.value || !supportAnimations.value) { soldier.value = undefined; return; }
   try {
-    const [model, animations] = await Promise.all([
-      supportModel.value === BUILTIN_SUPPORT_MODEL ? desktop.readBuiltinSupport('model') : desktop.readText(supportModel.value),
-      supportAnimations.value === BUILTIN_SUPPORT_ANIMATIONS ? desktop.readBuiltinSupport('animation') : desktop.readText(supportAnimations.value),
-    ]);
+    const assets = await loadSoldierAssets(supportModel.value, supportAnimations.value);
     if (token !== vehicleLoadToken) return;
-    soldier.value = SoldierAssets.parse(model, animations);
+    soldier.value = assets;
   }
   catch (e) { if (token === vehicleLoadToken) { soldier.value = undefined; status.value = `人物预览未载入：${message(e)}`; } }
 }
@@ -316,11 +334,13 @@ function edit(field: { sourceNode?: SourceNode; attr: string }, event: Event) {
   const value = (event.target as HTMLInputElement).value; if (document.value.value(field.sourceNode, field.attr) === value) return;
   recordUndo(); document.value.set(field.sourceNode, field.attr, value); rebuildPreview(); if (RESOURCE_ATTRS.has(field.attr)) scheduleValidate();
 }
-function move(node: SourceNode, attr: string, value: [number, number, number]) {
+function move(node: SourceNode, attr: string, value: [number, number, number], needsRebuild: boolean) {
   if (!document.value) return; const sourceNode = composition?.editableNode(node);
   if (!sourceNode) { status.value = '该位置继承自基础载具；请打开基础文件后编辑'; rebuildPreview(); return; }
   const text = vec3Text(value); if (document.value.value(sourceNode, attr) === text) return;
-  recordUndo(); document.value.set(sourceNode, attr, text); rebuildPreview(); status.value = `${attr} = ${text}`;
+  recordUndo(); document.value.set(sourceNode, attr, text);
+  if (needsRebuild) rebuildPreview(); else recomputePreview();
+  status.value = `${attr} = ${text}`;
 }
 function revert() {
   if (!document.value || !selected.value) return; const sourceNode = composition?.editableNode(selected.value.node);

@@ -6,10 +6,10 @@ import type { ResourceCatalog } from '../core/resources/resource-catalog';
 import type { SoldierAssets } from '../core/soldier/soldier-assets';
 
 const props = defineProps<{ document?: SourceDocument; catalog: ResourceCatalog; soldier?: SoldierAssets; options: ViewOptions; selectedId?: number; revision: number; vehicleKey?: string }>();
-const emit = defineEmits<{ select: [number]; move: [SourceNode, string, [number, number, number]] }>();
+const emit = defineEmits<{ select: [number]; move: [SourceNode, string, [number, number, number], boolean] }>();
 const host = ref<HTMLElement>(); const fps = ref(0); const dynamicOccupants = ref(0); const fading = ref(false);
 let controller: SceneController | undefined; let lastVehicleKey: string | undefined;
-onMounted(() => { controller = new SceneController(host.value!, (id) => emit('select', id), (node, attr, value) => emit('move', node, attr, value),
+onMounted(() => { controller = new SceneController(host.value!, (id) => emit('select', id), (node, attr, value, needsRebuild) => emit('move', node, attr, value, needsRebuild),
   (value, dynamic) => { fps.value = value; dynamicOccupants.value = dynamic; }); refresh(); });
 onBeforeUnmount(() => { /* window lifetime owns renderer */ });
 async function refresh() {
@@ -27,7 +27,8 @@ function scheduleRefresh() {
   refreshPending = true;
   requestAnimationFrame(() => { refreshPending = false; void refresh(); });
 }
-watch(() => [props.document, props.revision, props.soldier, props.options.showBroken, props.options.showOccupants, props.options.showBounds, props.options.showShields], scheduleRefresh);
+watch(() => [props.revision, props.soldier, props.options.showBroken, props.options.showOccupants, props.options.showBounds, props.options.showShields], scheduleRefresh);
+watch(() => props.document, (doc) => { if (doc) controller?.updateDocument(doc); });
 watch(() => props.selectedId, select);
 defineExpose({ reset: () => controller?.resetCamera(), top: () => controller?.topView(), side: () => controller?.sideView() });
 </script>
