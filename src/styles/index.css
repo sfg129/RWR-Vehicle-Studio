@@ -9,13 +9,15 @@ html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 button, input, select { font: inherit; }
 button { min-height: 32px; padding: 5px 11px; border: 1px solid var(--border-light); border-radius: 3px; color: var(--text); background: var(--surface-0); cursor: pointer; transition: background-color .15s ease, border-color .15s ease, color .15s ease, opacity .15s ease, box-shadow .15s ease; }
 button:hover:not(:disabled) { border-color: var(--accent); background: var(--surface-2); }
-button:active:not(:disabled) { background: var(--surface-3); }
+button:active:not(:disabled) { background: color-mix(in srgb, var(--accent) 22%, var(--surface-1)); border-color: var(--accent); }
 button:disabled { opacity: .42; cursor: default; }
 button:focus-visible { outline: none; box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent), transparent 40%); }
 button.primary { color: #17130a; border-color: #d39c32; background: var(--accent); font-weight: 700; }
 button.primary:hover:not(:disabled) { border-color: #f2c25e; background: #f2c25e; }
+button.primary:active:not(:disabled) { background: #cf9a30; border-color: #cf9a30; }
 button.danger { color: #ffc0c0; border-color: #793d43; }
 button.danger:hover:not(:disabled) { border-color: #b0525a; background: #33191d; }
+button.danger:active:not(:disabled) { background: #4a2024; }
 button.icon { min-width: 34px; padding: 2px; font-size: 24px; }
 button.small { min-height: 28px; padding: 3px 9px; font-size: 11px; }
 button.tiny { min-height: 24px; padding: 2px 7px; font-size: 10px; }
