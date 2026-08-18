@@ -53,6 +53,7 @@ const fields = computed(() => {
 const dirty = computed(() => { void revision.value; return document.value ? document.value.serialize() !== savedText.value : false; });
 const weaponDirty = computed(() => { void weaponRevision.value; return !!weaponSession.value && weaponSession.value.document.serialize() !== weaponSession.value.savedText; });
 const anyDirty = computed(() => dirty.value || weaponDirtyCount.value > 0);
+const dirtyWeaponSessions = computed(() => { void weaponRevision.value; return [...weaponSessions.values()].filter((session) => session.document.serialize() !== session.savedText); });
 const weaponShields = computed(() => { void weaponRevision.value; const session = weaponSession.value; if (!session) return []; return session.document.descendants('shield').map((node, index) => ({ node, index, offset: session.document.value(node, 'offset') ?? '', extent: session.document.value(node, 'extent') ?? '' })); });
 const canUndo = computed(() => undoStack.value.length > 0);
 const selectedEditable = computed(() => !!selected.value && !!composition?.editableNode(selected.value.node));
@@ -125,7 +126,11 @@ function rebuildPreview(preserveSelection = true) {
   selectedId.value = (identity ? entries.value.find((entry) => entry.kind === identity.kind && entry.index === identity.index) : entries.value[0])?.node.id;
   revision.value++;
 }
-function allowVehicleSwitch(): boolean { return !dirty.value || confirm('当前载具有未保存修改，仍要打开另一辆载具吗？'); }
+function allowVehicleSwitch(): boolean {
+  if (!anyDirty.value) return true;
+  const parts = [dirty.value ? '载具' : '', weaponDirtyCount.value ? `${weaponDirtyCount.value} 个武器` : ''].filter(Boolean);
+  return confirm(`有未保存修改（${parts.join('、')}），仍要打开另一辆载具吗？`);
+}
 async function chooseVehicleWorkspace() {
   try {
     const chosen = await desktop.chooseVehicleWorkspace(); if (!chosen) return;
@@ -211,14 +216,21 @@ function deleteShield(node: SourceNode) {
   const session = weaponSession.value; if (!session) return;
   session.document.removeNode(node); refreshWeaponPreview(); status.value = `已从 ${session.name} 删除 shield（尚未保存）`;
 }
-async function saveWeaponShields() {
-  const session = weaponSession.value; if (!session) return;
+async function saveWeaponShields() { if (weaponSession.value) await saveWeaponSession(weaponSession.value); }
+async function saveWeaponSession(session: WeaponSession) {
   try {
     const text = session.document.serialize(); const saved = await desktop.saveWeapon(session.path, text); session.savedText = text; session.document.commit(text);
     catalog.setWeaponPreview(session.key, session.path, text); weaponRevision.value++; updateWeaponDirtyCount(); revision.value++;
     status.value = `已保存武器：${saved.path}；备份：${saved.backupPath}`;
   } catch (error) { fail(error); }
 }
+function discardWeaponSession(session: WeaponSession) {
+  session.document = new SourceDocument(session.savedText);
+  catalog.setWeaponPreview(session.key, session.path, session.document.serialize()); weaponRevision.value++; updateWeaponDirtyCount(); revision.value++;
+  status.value = `已放弃 ${session.name} 的未保存修改`;
+}
+function saveAllWeapons() { for (const session of [...weaponSessions.values()]) if (session.document.serialize() !== session.savedText) void saveWeaponSession(session); }
+function discardAllWeapons() { for (const session of [...weaponSessions.values()]) discardWeaponSession(session); }
 async function reloadWeaponShields() {
   const session = weaponSession.value; if (!session || weaponDirty.value && !confirm('未保存的护盾修改将丢失，仍要从磁盘重新载入武器吗？')) return;
   try {
@@ -274,7 +286,7 @@ async function save(saveAs = false) {
   try { const text = document.value.serialize(); const wasAutomaticBase = baseAutomatic.value; const saved = await desktop.saveVehicle(opened.value.path, text, saveAs); if (!saved) return; opened.value = { name: saved.name, path: saved.path, text }; savedText.value = text; document.value.commit(text); if (saveAs && wasAutomaticBase) await resolveAutomaticBase(); rebuildPreview(); status.value = saved.backupPath ? `已保存；备份：${saved.backupPath}` : `已保存：${saved.path}`; }
   catch (e) { fail(e); }
 }
-async function reload() { if (!opened.value || dirty.value && !confirm('未保存修改将丢失，仍要重新载入吗？')) return; try { const text = await desktop.readText(opened.value.path); document.value = new SourceDocument(text); savedText.value = text; undoStack.value = []; if (baseAutomatic.value || !baseOpened.value) await resolveAutomaticBase(); rebuildPreview(); status.value = '已从磁盘重新载入'; } catch (e) { fail(e); } }
+async function reload() { if (!opened.value || anyDirty.value && !confirm('未保存修改将丢失，仍要重新载入吗？')) return; try { const text = await desktop.readText(opened.value.path); document.value = new SourceDocument(text); savedText.value = text; undoStack.value = []; if (baseAutomatic.value || !baseOpened.value) await resolveAutomaticBase(); rebuildPreview(); status.value = '已从磁盘重新载入'; } catch (e) { fail(e); } }
 async function overrideChanged() { await validate(); revision.value++; await loadSelectedWeaponEditor(); }
 function fail(e: unknown) { status.value = `错误：${message(e)}`; }
 function message(e: unknown) { return e instanceof Error ? e.message : String(e); }
@@ -297,6 +309,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keydown));
         <span class="divider"></span><button :disabled="!canUndo" title="Ctrl+Z" @click="undo">撤销</button><button :disabled="!document" class="primary" @click="save(false)">保存</button><button :disabled="!document" @click="save(true)">另存为</button><button :disabled="!document" @click="reload">重新载入</button>
       </nav>
       <div class="file-badge" :class="{ dirty: anyDirty }"><b>{{ opened?.name ?? '未打开文件' }}</b><span>{{ anyDirty ? `未保存：${dirty ? '载具' : ''}${dirty && weaponDirtyCount ? '、' : ''}${weaponDirtyCount ? `${weaponDirtyCount} 个武器` : ''}` : '磁盘同步' }}</span></div>
+      <details v-if="dirtyWeaponSessions.length" class="unsaved-weapons">
+        <summary>未保存武器 {{ dirtyWeaponSessions.length }}</summary>
+        <div class="unsaved-weapons-list">
+          <div class="unsaved-weapons-toolbar"><button class="primary" @click="saveAllWeapons">全部保存</button><button @click="discardAllWeapons">全部放弃</button></div>
+          <article v-for="session in dirtyWeaponSessions" :key="session.path">
+            <b>{{ session.name }}</b><span :title="session.path">{{ session.path }}</span>
+            <div><button @click="saveWeaponSession(session)">保存</button><button @click="discardWeaponSession(session)">放弃</button></div>
+          </article>
+        </div>
+      </details>
     </header>
 
     <section class="workspace">
