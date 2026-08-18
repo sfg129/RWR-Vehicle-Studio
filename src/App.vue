@@ -255,7 +255,7 @@ function move(node: SourceNode, attr: string, value: [number, number, number]) {
 function revert() {
   if (!document.value || !selected.value) return; const sourceNode = composition?.editableNode(selected.value.node);
   if (!sourceNode) { status.value = '继承项不能在覆盖文件中恢复；请打开基础文件'; return; }
-  recordUndo(); document.value.reset(sourceNode); for (const child of sourceNode.children) document.value.reset(child); rebuildPreview();
+  recordUndo(); document.value.revertNode(sourceNode); rebuildPreview();
 }
 function addEmptyObject() {
   if (!document.value?.root || !newObjectType.value) return;
@@ -283,7 +283,7 @@ function undo() {
 }
 async function save(saveAs = false) {
   if (!document.value || !opened.value) return;
-  try { const text = document.value.serialize(); const wasAutomaticBase = baseAutomatic.value; const saved = await desktop.saveVehicle(opened.value.path, text, saveAs); if (!saved) return; opened.value = { name: saved.name, path: saved.path, text }; savedText.value = text; document.value.commit(text); if (saveAs && wasAutomaticBase) await resolveAutomaticBase(); rebuildPreview(); status.value = saved.backupPath ? `已保存；备份：${saved.backupPath}` : `已保存：${saved.path}`; }
+  try { const text = document.value.serialize(); const wasAutomaticBase = baseAutomatic.value; const saved = await desktop.saveVehicle(opened.value.path, text, saveAs); if (!saved) return; opened.value = { name: saved.name, path: saved.path, text }; savedText.value = text; document.value.commit(text); document.value.markSaved(); if (saveAs && wasAutomaticBase) await resolveAutomaticBase(); rebuildPreview(); status.value = saved.backupPath ? `已保存；备份：${saved.backupPath}` : `已保存：${saved.path}`; }
   catch (e) { fail(e); }
 }
 async function reload() { if (!opened.value || anyDirty.value && !confirm('未保存修改将丢失，仍要重新载入吗？')) return; try { const text = await desktop.readText(opened.value.path); document.value = new SourceDocument(text); savedText.value = text; undoStack.value = []; if (baseAutomatic.value || !baseOpened.value) await resolveAutomaticBase(); rebuildPreview(); status.value = '已从磁盘重新载入'; } catch (e) { fail(e); } }

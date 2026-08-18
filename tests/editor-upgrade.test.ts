@@ -22,6 +22,27 @@ describe('结构编辑', () => {
   });
 });
 
+describe('恢复本项（RV-009）', () => {
+  it('结构操作 materialize 后仍从保存快照恢复节点', () => {
+    const document = new SourceDocument('<vehicle><visual class="chassis" offset="1 2 3"/></vehicle>');
+    const visual = document.descendants('visual')[0];
+    document.set(visual, 'offset', '9 9 9');
+    document.appendChild(document.root!, 'turret');
+    expect(document.value(document.descendants('visual')[0], 'offset')).toBe('9 9 9');
+    document.revertNode(document.descendants('visual')[0]);
+    expect(document.value(document.descendants('visual')[0], 'offset')).toBe('1 2 3');
+    expect(document.descendants('turret')).toHaveLength(1);
+  });
+  it('revertNode 保留其它节点的 pending 修改', () => {
+    const document = new SourceDocument('<vehicle><visual offset="1 0 0"/><turret offset="2 0 0"/></vehicle>');
+    document.set(document.descendants('turret')[0], 'offset', '5 0 0');
+    document.set(document.descendants('visual')[0], 'offset', '9 0 0');
+    document.revertNode(document.descendants('visual')[0]);
+    expect(document.value(document.descendants('visual')[0], 'offset')).toBe('1 0 0');
+    expect(document.value(document.descendants('turret')[0], 'offset')).toBe('5 0 0');
+  });
+});
+
 describe('武器预览资源', () => {
   it('识别 XML 体素模型和全部护盾范围', () => {
     const weapon = parseWeaponDefinition('<weapon><model filename="weapon_m18.xml"/><shield offset="0 0.55 0.7" extent="0.75 4 4"/><shield offset="1 2 3" extent="4 5 6"/></weapon>', 'test.weapon');

@@ -25,7 +25,8 @@ export class SourceDocument {
   readonly roots: SourceNode[] = [];
   readonly nodes: SourceNode[] = [];
   private changes = new Map<string, string>();
-  constructor(public source: string) { this.parse(); }
+  private saved: string;
+  constructor(public source: string) { this.saved = source; this.parse(); }
 
   get root(): SourceNode | undefined { return this.roots[0]; }
   get dirty(): boolean { return this.changes.size > 0; }
@@ -46,6 +47,25 @@ export class SourceDocument {
   reset(node?: SourceNode): void {
     if (!node) this.changes.clear();
     else for (const attr of node.attributes) this.changes.delete(this.key(node, attr.name));
+  }
+  /** Mark the current working text as the saved snapshot (call after a successful save). */
+  markSaved(): void { this.saved = this.source; }
+  /** Restore this node's subtree to the saved snapshot, preserving pending edits on other nodes. */
+  revertNode(node: SourceNode): void {
+    const savedDoc = new SourceDocument(this.saved);
+    const savedNode = nodeAtPath(savedDoc.root, pathOf(node));
+    if (!savedNode) return;
+    const savedRaw = savedDoc.raw(savedNode);
+    const outside: { path: number[]; attr: string; value: string }[] = [];
+    for (const n of this.nodes) {
+      if (n.start >= node.start && n.endTagEnd <= node.endTagEnd) continue;
+      for (const attr of n.attributes) {
+        const changed = this.changes.get(this.key(n, attr.name));
+        if (changed !== undefined) outside.push({ path: pathOf(n), attr: attr.name, value: changed });
+      }
+    }
+    this.commit(this.source.slice(0, node.start) + savedRaw + this.source.slice(node.endTagEnd));
+    for (const pending of outside) { const target = nodeAtPath(this.root, pending.path); if (target) this.set(target, pending.attr, pending.value); }
   }
   addAttribute(node: SourceNode, name: string, value = '0'): void {
     const id = node.id; this.materialize(); const current = this.nodes[id];
@@ -189,4 +209,15 @@ function unescapeXml(value: string): string {
 function lineIndent(text: string, at: number): string {
   const start = text.lastIndexOf('\n', at - 1) + 1;
   return text.slice(start, at).match(/^[ \t]*/)?.[0] ?? '';
+}
+function pathOf(node: SourceNode): number[] {
+  const path: number[] = [];
+  let current: SourceNode | null = node;
+  while (current?.parent) { path.unshift(current.parent.children.indexOf(current)); current = current.parent; }
+  return path;
+}
+function nodeAtPath(root: SourceNode | undefined, path: number[]): SourceNode | undefined {
+  let current = root;
+  for (const index of path) { current = current?.children[index]; if (!current) return undefined; }
+  return current;
 }
