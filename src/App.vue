@@ -329,10 +329,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keydown));
       <details v-if="dirtyWeaponSessions.length" class="unsaved-weapons">
         <summary>未保存武器 {{ dirtyWeaponSessions.length }}</summary>
         <div class="unsaved-weapons-list">
-          <div class="unsaved-weapons-toolbar"><button class="primary" @click="saveAllWeapons">全部保存</button><button @click="discardAllWeapons">全部放弃</button></div>
+          <div class="unsaved-weapons-toolbar"><button class="small primary" @click="saveAllWeapons">全部保存</button><button class="small" @click="discardAllWeapons">全部放弃</button></div>
           <article v-for="session in dirtyWeaponSessions" :key="session.path">
             <b>{{ session.name }}</b><span :title="session.path">{{ session.path }}</span>
-            <div><button @click="saveWeaponSession(session)">保存</button><button @click="discardWeaponSession(session)">放弃</button></div>
+            <div><button class="small" @click="saveWeaponSession(session)">保存</button><button class="small" @click="discardWeaponSession(session)">放弃</button></div>
           </article>
         </div>
       </details>
@@ -342,7 +342,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keydown));
       <aside class="scene-panel">
         <details class="vehicle-workspace" :open="workspacePanelOpen" @toggle="workspacePanelToggled">
           <summary><span>载具工作区</span><b>{{ vehicleWorkspace ? workspaceRows.length : 0 }}</b></summary>
-          <div class="workspace-toolbar"><button @click="chooseVehicleWorkspace">打开文件夹</button><span :title="vehicleWorkspace?.root">{{ vehicleWorkspace?.root ?? '尚未选择工作区' }}</span></div>
+          <div class="workspace-toolbar"><button class="small" @click="chooseVehicleWorkspace">打开文件夹</button><span :title="vehicleWorkspace?.root">{{ vehicleWorkspace?.root ?? '尚未选择工作区' }}</span></div>
           <div v-if="workspaceError" class="workspace-error">{{ workspaceError }}</div>
           <div v-else-if="vehicleWorkspace && !workspaceRows.length" class="workspace-empty">此文件夹为空</div>
           <div v-else class="workspace-tree">
@@ -353,12 +353,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keydown));
         </details>
         <section v-if="baseReference" class="base-vehicle-box" :class="{ missing: !baseOpened }">
           <div><small>BASE VEHICLE</small><b>{{ baseOpened?.name ?? baseReference }}</b><span>{{ baseOpened ? (baseAutomatic ? '同目录自动匹配' : '手动指定') : baseError }}</span></div>
-          <div class="base-actions"><button v-if="baseOpened" @click="openBaseVehicle">打开基础</button><button @click="chooseBaseVehicle">手动选择</button><button v-if="!baseAutomatic" @click="retryAutomaticBase">自动匹配</button></div>
+          <div class="base-actions"><button v-if="baseOpened" class="tiny" @click="openBaseVehicle">打开基础</button><button class="tiny" @click="chooseBaseVehicle">手动选择</button><button v-if="!baseAutomatic" class="tiny" @click="retryAutomaticBase">自动匹配</button></div>
         </section>
         <div class="panel-title"><small>SCENE GRAPH</small><h2>场景对象</h2></div>
         <div v-if="document" class="object-add-row">
           <select v-model="newObjectType" :disabled="!vehicleSchema.objectTypes.length" title="候选来自当前工作区的 .vehicle 文件"><option disabled value="">选择对象类型</option><option v-for="name in vehicleSchema.objectTypes" :key="name" :value="name">{{ name }}</option></select>
-          <button :disabled="!newObjectType" @click="addEmptyObject">增加空对象</button>
+          <button class="small" :disabled="!newObjectType" @click="addEmptyObject">增加空对象</button>
         </div>
         <small v-if="document && !vehicleSchema.objectTypes.length" class="schema-hint">打开载具工作区后可从其中出现过的类型增加对象。</small>
         <div v-if="!document" class="empty-state">打开载具文件后，此处会按物理、炮塔、外观和乘员分类。</div>
@@ -372,7 +372,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keydown));
       </aside>
 
       <section class="viewport-panel">
-        <EditorViewport :document="previewDocument" :catalog="catalog" :soldier="soldier" :options="options" :selected-id="selectedId" :revision="revision" @select="select" @move="move" />
+        <EditorViewport :document="previewDocument" :catalog="catalog" :soldier="soldier" :options="options" :selected-id="selectedId" :revision="revision" :vehicle-key="opened?.path" @select="select" @move="move" />
         <div v-if="!document" class="viewport-empty"><b>NO VEHICLE LOADED</b><span>读取 .vehicle、OGRE .mesh 与引用纹理，在游戏外直接校准数字。</span><button class="primary" @click="openVehicle">选择载具文件</button></div>
         <div class="quick-options">
           <label><input v-model="options.showBounds" type="checkbox" /> 碰撞框</label><label><input v-model="options.showShields" type="checkbox" /> 显示护盾范围</label><label><input v-model="options.showOccupants" type="checkbox" /> 乘员</label><label><input v-model="options.animate" type="checkbox" /> 动画</label><label><input v-model="options.showBroken" type="checkbox" /> 损毁外观</label>
@@ -401,11 +401,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keydown));
               <label><span>offset</span><input :value="shield.offset" @change="editShield(shield.node, 'offset', $event)" /></label>
               <label><span>extent</span><input :value="shield.extent" @change="editShield(shield.node, 'extent', $event)" /></label>
             </article>
-            <div class="weapon-actions"><button @click="addShield">增加 shield</button><button @click="reloadWeaponShields">重新载入</button><button class="primary" :disabled="!weaponDirty" @click="saveWeaponShields">保存武器护盾</button></div>
+            <div class="weapon-actions"><button class="small" @click="addShield">增加 shield</button><button class="small" @click="reloadWeaponShields">重新载入</button><button class="small primary" :disabled="!weaponDirty" @click="saveWeaponShields">保存武器护盾</button></div>
           </template>
         </section>
-        <div v-if="selected" class="attribute-add-row"><select v-model="newAttribute" :disabled="!selectedEditable || !availableAttributes.length"><option disabled value="">选择可加入的数值类</option><option v-for="name in availableAttributes" :key="name" :value="name">{{ name }}</option></select><button :disabled="!newAttribute || !selectedEditable" @click="addSelectedAttribute">加入新数值类</button></div>
-        <div class="inspector-actions"><button :disabled="!selectedEditable" class="danger" @click="deleteSelectedObject">删除对象</button><button :disabled="!selectedEditable" @click="revert">恢复本项</button><button :disabled="!document" class="primary" @click="save(false)">保存载具</button></div>
+        <div v-if="selected" class="attribute-add-row"><select v-model="newAttribute" :disabled="!selectedEditable || !availableAttributes.length"><option disabled value="">选择可加入的数值类</option><option v-for="name in availableAttributes" :key="name" :value="name">{{ name }}</option></select><button class="small" :disabled="!newAttribute || !selectedEditable" @click="addSelectedAttribute">加入新数值类</button></div>
+        <div class="inspector-actions"><button class="small danger" :disabled="!selectedEditable" @click="deleteSelectedObject">删除对象</button><button class="small" :disabled="!selectedEditable" @click="revert">恢复本项</button><button class="small primary" :disabled="!document" @click="save(false)">保存载具</button></div>
       </aside>
     </section>
 
