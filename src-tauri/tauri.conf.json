@@ -3,7 +3,7 @@
   "productName": "RWR Vehicle Studio",
   "version": "0.2.3",
   "identifier": "io.github.sfg129.rwr-vehicle-studio",
-  "build": { "beforeDevCommand": "npm exec vite -- --host 127.0.0.1", "devUrl": "http://localhost:1420", "beforeBuildCommand": "npm run build:frontend", "frontendDist": "../dist" },
+  "build": { "beforeDevCommand": "bunx vite --host 127.0.0.1", "devUrl": "http://localhost:1420", "beforeBuildCommand": "bun run build:frontend", "frontendDist": "../dist" },
   "app": {
     "windows": [{ "title": "RWR 载具可视化编辑器", "width": 1500, "height": 900, "minWidth": 1050, "minHeight": 650, "resizable": true }],
     "security": { "csp": null }

@@ -35,19 +35,19 @@ RWR Vehicle Studio is an offline visual vehicle editor for _Running With Rifles_
 
 ## 开发与构建
 
-需要 Node.js/npm、Rust stable 和 Tauri 2 在 Windows 上所需的 WebView2/C++ 构建环境。
+需要 Bun、Rust stable 和 Tauri 2 在 Windows 上所需的 WebView2/C++ 构建环境。
 
 ```powershell
-npm.cmd install
-npm.cmd test
-npm.cmd run build:frontend
-npm.cmd run dev
+bun install
+bun run test
+bun run build:frontend
+bun run dev
 ```
 
 正式构建：
 
 ```powershell
-npm.cmd run build
+bun run build
 ```
 
 构建结果位于 `src-tauri/target/release/bundle/`。仓库不会跟踪 `release/`、`dist/`、`node_modules/` 或 Rust `target/` 等生成内容。
