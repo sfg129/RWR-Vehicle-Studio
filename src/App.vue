@@ -75,7 +75,7 @@ async function openVehicle() {
 let vehicleLoadToken = 0;
 async function loadOpenedVehicle(file: OpenedFile) {
   const token = ++vehicleLoadToken;
-  opened.value = file; document.value = new SourceDocument(file.text); savedText.value = file.text; undoStack.value = []; missing.value = [];
+  opened.value = file; document.value = new SourceDocument(file.text); savedText.value = file.text; undoStack.value = []; missing.value = []; collapsedGroups.clear();
   await resolveAutomaticBase(token);
   if (token !== vehicleLoadToken) return;
   rebuildPreview(false);
@@ -146,7 +146,24 @@ async function restoreVehicleWorkspace() {
 async function refreshVehicleSchema(root: string) {
   vehicleSchema.value = await desktop.scanVehicleSchema(root); newObjectType.value = vehicleSchema.value.objectTypes[0] ?? ''; newAttribute.value = '';
 }
-function workspacePanelToggled(event: Event) { workspacePanelOpen.value = (event.currentTarget as HTMLDetailsElement).open; persistVehicleWorkspace(); }
+const collapsedGroups = reactive(new Set<string>());
+function toggleWorkspacePanel() { workspacePanelOpen.value = !workspacePanelOpen.value; persistVehicleWorkspace(); }
+function toggleGroup(kind: string) { if (collapsedGroups.has(kind)) collapsedGroups.delete(kind); else collapsedGroups.add(kind); }
+function collapseAnim(node: HTMLElement, from: string, to: string, done: () => void) {
+  let finished = false;
+  const finish = () => { if (finished) return; finished = true; node.style.height = ''; done(); };
+  const anim = node.animate([{ height: from }, { height: to }], { duration: 250, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' });
+  anim.onfinish = finish; anim.oncancel = finish;
+}
+function onCollapseEnter(el: Element, done: () => void) {
+  const node = el as HTMLElement;
+  node.style.height = '0px';
+  collapseAnim(node, '0px', `${node.scrollHeight}px`, done);
+}
+function onCollapseLeave(el: Element, done: () => void) {
+  const node = el as HTMLElement;
+  collapseAnim(node, `${node.scrollHeight}px`, '0px', done);
+}
 function persistVehicleWorkspace() { saveWorkspacePreferences({ root: vehicleWorkspace.value?.root ?? savedWorkspace.root, expanded: [...expandedWorkspacePaths], panelOpen: workspacePanelOpen.value }); }
 async function activateWorkspaceEntry(entry: VehicleWorkspaceEntry) {
   if (entry.isDirectory) {
@@ -325,13 +342,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keydown));
         <button @click="openVehicle">打开载具</button><button @click="resourceDialog = true">资源文件夹</button><button @click="overrideDialog = true">文件覆盖</button>
         <span class="divider"></span><button :disabled="!canUndo" title="Ctrl+Z" @click="undo">撤销</button><button :disabled="!document" class="primary" @click="save(false)">保存</button><button :disabled="!document" @click="save(true)">另存为</button><button :disabled="!document" @click="reload">重新载入</button>
       </nav>
-      <div class="file-badge" :class="{ dirty: anyDirty }"><b>{{ opened?.name ?? '未打开文件' }}</b><span>{{ anyDirty ? `未保存：${dirty ? '载具' : ''}${dirty && weaponDirtyCount ? '、' : ''}${weaponDirtyCount ? `${weaponDirtyCount} 个武器` : ''}` : '磁盘同步' }}</span></div>
+      <div class="file-badge" :class="{ active: opened }"><b class="ellipsis">{{ opened?.name ?? '未打开文件' }}</b><span>{{ anyDirty ? `未保存：${dirty ? '载具' : ''}${dirty && weaponDirtyCount ? '、' : ''}${weaponDirtyCount ? `${weaponDirtyCount} 个武器` : ''}` : '磁盘同步' }}</span></div>
       <details v-if="dirtyWeaponSessions.length" class="unsaved-weapons">
         <summary>未保存武器 {{ dirtyWeaponSessions.length }}</summary>
         <div class="unsaved-weapons-list">
           <div class="unsaved-weapons-toolbar"><button class="small primary" @click="saveAllWeapons">全部保存</button><button class="small" @click="discardAllWeapons">全部放弃</button></div>
           <article v-for="session in dirtyWeaponSessions" :key="session.path">
-            <b>{{ session.name }}</b><span :title="session.path">{{ session.path }}</span>
+            <b class="ellipsis">{{ session.name }}</b><span class="ellipsis" :title="session.path">{{ session.path }}</span>
             <div><button class="small" @click="saveWeaponSession(session)">保存</button><button class="small" @click="discardWeaponSession(session)">放弃</button></div>
           </article>
         </div>
@@ -340,19 +357,27 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keydown));
 
     <section class="workspace">
       <aside class="scene-panel">
-        <details class="vehicle-workspace" :open="workspacePanelOpen" @toggle="workspacePanelToggled">
-          <summary><span>载具工作区</span><b>{{ vehicleWorkspace ? workspaceRows.length : 0 }}</b></summary>
-          <div class="workspace-toolbar"><button class="small" @click="chooseVehicleWorkspace">打开文件夹</button><span :title="vehicleWorkspace?.root">{{ vehicleWorkspace?.root ?? '尚未选择工作区' }}</span></div>
-          <div v-if="workspaceError" class="workspace-error">{{ workspaceError }}</div>
-          <div v-else-if="vehicleWorkspace && !workspaceRows.length" class="workspace-empty">此文件夹为空</div>
-          <div v-else class="workspace-tree">
-            <button v-for="row in workspaceRows" :key="row.entry.path" class="workspace-entry" :class="{ directory: row.entry.isDirectory, vehicle: row.entry.isVehicle, other: !row.entry.isDirectory && !row.entry.isVehicle, active: opened?.path === row.entry.path }" :style="{ paddingLeft: `${9 + row.depth * 14}px` }" :title="row.entry.path" @click="activateWorkspaceEntry(row.entry)">
-              <span class="workspace-kind">{{ row.entry.isDirectory ? (expandedWorkspacePaths.has(row.entry.path) ? '▾' : '▸') : row.entry.isVehicle ? 'V' : '·' }}</span><span>{{ row.entry.name }}</span>
-            </button>
-          </div>
-        </details>
+        <section class="vehicle-workspace collapse-group">
+          <button type="button" class="collapse-summary" @click="toggleWorkspacePanel">
+            <span class="collapse-caret">{{ workspacePanelOpen ? '▾' : '▸' }}</span><span>载具工作区</span><b>{{ vehicleWorkspace ? workspaceRows.length : 0 }}</b>
+          </button>
+          <Transition @enter="onCollapseEnter" @leave="onCollapseLeave">
+            <div v-show="workspacePanelOpen" class="collapse-body">
+              <div class="workspace-toolbar"><span class="ellipsis" :title="vehicleWorkspace?.root">{{ vehicleWorkspace?.root ?? '尚未选择工作区' }}</span><button class="small" @click="chooseVehicleWorkspace">打开文件夹</button></div>
+              <div v-if="workspaceError" class="workspace-error">{{ workspaceError }}</div>
+              <div v-else-if="vehicleWorkspace && !workspaceRows.length" class="workspace-empty">此文件夹为空</div>
+              <div v-else class="workspace-tree">
+                <TransitionGroup name="tree" tag="div">
+                  <button v-for="row in workspaceRows" :key="row.entry.path" class="list-item workspace-entry" :class="{ directory: row.entry.isDirectory, vehicle: row.entry.isVehicle, other: !row.entry.isDirectory && !row.entry.isVehicle, active: opened?.path === row.entry.path }" :style="{ paddingLeft: `${9 + row.depth * 14}px` }" :title="row.entry.path" @click="activateWorkspaceEntry(row.entry)">
+                    <span class="workspace-kind">{{ row.entry.isDirectory ? (expandedWorkspacePaths.has(row.entry.path) ? '▾' : '▸') : row.entry.isVehicle ? 'V' : '·' }}</span><span class="ellipsis">{{ row.entry.name }}</span>
+                  </button>
+                </TransitionGroup>
+              </div>
+            </div>
+          </Transition>
+        </section>
         <section v-if="baseReference" class="base-vehicle-box" :class="{ missing: !baseOpened }">
-          <div><small>BASE VEHICLE</small><b>{{ baseOpened?.name ?? baseReference }}</b><span>{{ baseOpened ? (baseAutomatic ? '同目录自动匹配' : '手动指定') : baseError }}</span></div>
+          <div><small>BASE VEHICLE</small><b class="ellipsis">{{ baseOpened?.name ?? baseReference }}</b><span class="ellipsis">{{ baseOpened ? (baseAutomatic ? '同目录自动匹配' : '手动指定') : baseError }}</span></div>
           <div class="base-actions"><button v-if="baseOpened" class="tiny" @click="openBaseVehicle">打开基础</button><button class="tiny" @click="chooseBaseVehicle">手动选择</button><button v-if="!baseAutomatic" class="tiny" @click="retryAutomaticBase">自动匹配</button></div>
         </section>
         <div class="panel-title"><small>SCENE GRAPH</small><h2>场景对象</h2></div>
@@ -362,13 +387,19 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keydown));
         </div>
         <small v-if="document && !vehicleSchema.objectTypes.length" class="schema-hint">打开载具工作区后可从其中出现过的类型增加对象。</small>
         <div v-if="!document" class="empty-state">打开载具文件后，此处会按物理、炮塔、外观和乘员分类。</div>
-        <details v-for="group in groups" :key="group.kind" open>
-          <summary><span>{{ group.label }}</span><b>{{ group.items.length }}</b></summary>
-          <button v-for="item in group.items" :key="item.node.id" class="scene-item" :class="{ active: selectedId === item.node.id, inherited: composition?.inherited(item.node) }" :title="composition?.inherited(item.node) ? '继承自基础载具（只读）' : '来自当前载具文件'" @click="select(item.node.id)">
-            <span class="kind-mark">{{ item.index }}</span><span>{{ item.label }}</span><em v-if="composition?.inherited(item.node)">基础</em>
+        <div v-for="group in groups" :key="group.kind" class="collapse-group">
+          <button type="button" class="collapse-summary" @click="toggleGroup(group.kind)">
+            <span class="collapse-caret">{{ collapsedGroups.has(group.kind) ? '▸' : '▾' }}</span><span>{{ group.label }}</span><b>{{ group.items.length }}</b>
           </button>
-        </details>
-        <div v-if="missing.length" class="missing-box"><strong>未解析资源 {{ missing.length }}</strong><span v-for="item in missing.slice(0, 12)" :key="item">{{ item }}</span><button @click="overrideDialog = true">指定单文件覆盖</button></div>
+          <Transition @enter="onCollapseEnter" @leave="onCollapseLeave">
+            <div v-show="!collapsedGroups.has(group.kind)" class="collapse-body">
+              <button v-for="item in group.items" :key="item.node.id" class="list-item scene-item" :class="{ active: selectedId === item.node.id, inherited: composition?.inherited(item.node) }" :title="composition?.inherited(item.node) ? '继承自基础载具（只读）' : '来自当前载具文件'" @click="select(item.node.id)">
+                <span class="kind-mark">{{ item.index }}</span><span>{{ item.label }}</span><em v-if="composition?.inherited(item.node)">基础</em>
+              </button>
+            </div>
+          </Transition>
+        </div>
+        <div v-if="missing.length" class="missing-box"><strong>未解析资源 {{ missing.length }}</strong><span class="ellipsis" v-for="item in missing.slice(0, 12)" :key="item">{{ item }}</span><button @click="overrideDialog = true">指定单文件覆盖</button></div>
       </aside>
 
       <section class="viewport-panel">
@@ -384,22 +415,22 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keydown));
         <p class="muted">数值修改即时进入预览；位置也可在视口拖动三轴箭头。保存只写载具 XML。</p>
         <div v-if="!selected" class="empty-state">从场景对象中选择一项。</div>
         <div v-else class="field-list">
-          <label v-for="field in fields" :key="`${field.node.id}:${field.attr}`">
-            <span><small>{{ field.section }}{{ field.inherited ? ' · 基础只读' : '' }}</small>{{ field.attr }}</span>
+          <label v-for="field in fields" class="field-row" :key="`${field.node.id}:${field.attr}`">
+            <span class="ellipsis"><small>{{ field.section }}{{ field.inherited ? ' · 基础只读' : '' }}</small>{{ field.attr }}</span>
             <input :value="field.value" :disabled="!field.sourceNode" @change="edit(field, $event)" />
             <button class="field-delete" :disabled="!field.sourceNode" :title="`删除 ${field.attr}`" @click="deleteAttribute(field)">×</button>
           </label>
         </div>
         <section v-if="selected?.kind === 'turret'" class="weapon-shield-editor">
-          <header><div><small>WEAPON SHIELDS</small><b>{{ weaponSession?.name || selectedWeaponKey || '未引用武器' }}</b></div><em v-if="weaponDirty">未保存</em></header>
+          <header><div><small>WEAPON SHIELDS</small><b class="ellipsis">{{ weaponSession?.name || selectedWeaponKey || '未引用武器' }}</b></div><em v-if="weaponDirty">未保存</em></header>
           <p v-if="weaponLoadError" class="weapon-error">{{ weaponLoadError }}</p>
           <template v-else-if="weaponSession">
-            <p class="weapon-path" :title="weaponSession.path">{{ weaponSession.path }}</p>
+            <p class="weapon-path ellipsis" :title="weaponSession.path">{{ weaponSession.path }}</p>
             <div v-if="!weaponShields.length" class="weapon-empty">此武器没有 shield，可在下方增加。</div>
             <article v-for="shield in weaponShields" :key="shield.node.id" class="shield-card">
               <div><b>shield {{ shield.index }}</b><button class="field-delete" title="删除此 shield" @click="deleteShield(shield.node)">×</button></div>
-              <label><span>offset</span><input :value="shield.offset" @change="editShield(shield.node, 'offset', $event)" /></label>
-              <label><span>extent</span><input :value="shield.extent" @change="editShield(shield.node, 'extent', $event)" /></label>
+              <label class="field-row"><span>offset</span><input :value="shield.offset" @change="editShield(shield.node, 'offset', $event)" /></label>
+              <label class="field-row"><span>extent</span><input :value="shield.extent" @change="editShield(shield.node, 'extent', $event)" /></label>
             </article>
             <div class="weapon-actions"><button class="small" @click="addShield">增加 shield</button><button class="small" @click="reloadWeaponShields">重新载入</button><button class="small primary" :disabled="!weaponDirty" @click="saveWeaponShields">保存武器护盾</button></div>
           </template>
@@ -409,8 +440,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keydown));
       </aside>
     </section>
 
-    <footer class="statusbar"><span>{{ status }}</span><span>{{ opened?.path ?? '' }}</span></footer>
-    <Transition name="modal"><ResourceDialog v-if="resourceDialog" :catalog="catalog" :support-model="supportModel" :support-animations="supportAnimations" @close="resourceDialog = false" @apply="resourcesApplied" /></Transition>
-    <Transition name="modal"><OverrideDialog v-if="overrideDialog" :catalog="catalog" @close="overrideDialog = false" @changed="overrideChanged" /></Transition>
+    <footer class="statusbar"><span>{{ status }}</span><span class="ellipsis">{{ opened?.path ?? '' }}</span></footer>
+    <Transition name="modal" appear><ResourceDialog v-if="resourceDialog" :catalog="catalog" :support-model="supportModel" :support-animations="supportAnimations" @close="resourceDialog = false" @apply="resourcesApplied" /></Transition>
+    <Transition name="modal" appear><OverrideDialog v-if="overrideDialog" :catalog="catalog" @close="overrideDialog = false" @changed="overrideChanged" /></Transition>
   </main>
 </template>

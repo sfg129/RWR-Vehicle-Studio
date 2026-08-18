@@ -26,6 +26,7 @@ export class SourceDocument {
   readonly nodes: SourceNode[] = [];
   private changes = new Map<string, string>();
   private saved: string;
+  private serializedCache: string | undefined;
   constructor(public source: string) { this.saved = source; this.parse(); }
 
   get root(): SourceNode | undefined { return this.roots[0]; }
@@ -43,10 +44,12 @@ export class SourceDocument {
     if (original === undefined) throw new Error(`属性 ${attr} 不存在；当前版本只修改已有属性`);
     const key = this.key(node, attr);
     if (value === original) this.changes.delete(key); else this.changes.set(key, value);
+    this.serializedCache = undefined;
   }
   reset(node?: SourceNode): void {
     if (!node) this.changes.clear();
     else for (const attr of node.attributes) this.changes.delete(this.key(node, attr.name));
+    this.serializedCache = undefined;
   }
   /** Mark the current working text as the saved snapshot (call after a successful save). */
   markSaved(): void { this.saved = this.source; }
@@ -112,9 +115,10 @@ export class SourceDocument {
     else if (this.source[end] === '\n') end += 1;
     this.commit(this.source.slice(0, start) + this.source.slice(end));
   }
-  commit(serialized: string): void { this.source = serialized; this.changes.clear(); this.roots.length = 0; this.nodes.length = 0; this.parse(); }
+  commit(serialized: string): void { this.source = serialized; this.changes.clear(); this.roots.length = 0; this.nodes.length = 0; this.serializedCache = undefined; this.parse(); }
 
   serialize(): string {
+    if (this.serializedCache !== undefined) return this.serializedCache;
     const replacements: { start: number; end: number; value: string }[] = [];
     for (const node of this.nodes) for (const attr of node.attributes) {
       const changed = this.changes.get(this.key(node, attr.name));
@@ -123,6 +127,7 @@ export class SourceDocument {
     replacements.sort((a, b) => b.start - a.start);
     let result = this.source;
     for (const r of replacements) result = result.slice(0, r.start) + r.value + result.slice(r.end);
+    this.serializedCache = result;
     return result;
   }
 
