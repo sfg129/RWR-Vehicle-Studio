@@ -1,5 +1,6 @@
 :root {
-  font-family: Bahnschrift, "Segoe UI Variable", "Microsoft YaHei UI", sans-serif; color: #eef1f3; background: #0b0d0f;
+  font-family: "Segoe UI", "Microsoft YaHei UI", system-ui, -apple-system, sans-serif; color: #eef1f3; background: #0b0d0f;
+  -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
   --accent: #f0b84b; --bg: #0b0d0f; --surface-0: #101316; --surface-1: #15191d; --surface-2: #1a1f24;
   --surface-3: #22282e; --border: #30373d; --border-light: #465058; --text: #f2f3f3; --muted: #aeb6bc; --danger: #ff6868;
 }
