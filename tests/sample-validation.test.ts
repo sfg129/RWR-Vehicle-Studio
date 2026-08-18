@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SourceDocument } from '../src/core/xml/source-document';
-import { characterSlotHidden, characterSlotPose, sceneEntries, tireVisualPosition, turretWorldPose } from '../src/core/vehicle/vehicle-model';
+import { characterSlotHidden, characterSlotPose, editableBasisRotation, rotateY, sceneEntries, tireVisualPosition, turretWorldPose } from '../src/core/vehicle/vehicle-model';
 import { composeVehicle, vehicleBaseReference } from '../src/core/vehicle/vehicle-composition';
 import { parseOgreMesh } from '../src/core/ogre/mesh-reader';
 import { SoldierAssets, SOLDIER_GAME_SCALE, rwrLinearToDisplay } from '../src/core/soldier/soldier-assets';
@@ -189,5 +189,36 @@ describe('乘员显示规则', () => {
     expect(attached.position[2]).toBeCloseTo(-1 - Math.sin(Math.PI / 2 + 0.5));
     expect(attached.rotation).toBeCloseTo(Math.PI / 2 + 0.75);
     expect(characterSlotPose(doc, slots[1], turrets).position).toEqual([2, 4, 6]);
+  });
+});
+
+describe('局部坐标编辑基准（RV-003）', () => {
+  it('无父炮塔的 offset 基准为 0，子炮塔基准为父炮塔累计旋转', () => {
+    const doc = new SourceDocument('<vehicle><turret offset="10 0 0" rotation="1.5707963267948966"/><turret offset="1 0 0" parent_turret_index="0"/></vehicle>');
+    const turrets = doc.root!.children.filter((n) => n.name === 'turret');
+    expect(editableBasisRotation(doc, turrets[0])).toBe(0);
+    expect(editableBasisRotation(doc, turrets[1])).toBeCloseTo(Math.PI / 2);
+  });
+  it('turret visual 的 offset 基准是 turret_index 炮塔的累计旋转', () => {
+    const doc = new SourceDocument('<vehicle><turret rotation="1.5707963267948966"/><visual class="turret" turret_index="0" offset="1 0 0"/></vehicle>');
+    expect(editableBasisRotation(doc, doc.descendants('visual')[0])).toBeCloseTo(Math.PI / 2);
+  });
+  it('普通外观、未 attach 乘员基准为 0；attached 乘员基准为所附炮塔累计旋转', () => {
+    const doc = new SourceDocument('<vehicle><turret rotation="0.5"/><visual class="chassis" offset="1 0 0"/><character_slot seat_position="0 0 0"/><character_slot attached_on_turret="0" seat_position="1 0 0"/></vehicle>');
+    const chassis = doc.descendants('visual').find((v) => doc.value(v, 'class') === 'chassis')!;
+    const [plain, attached] = doc.descendants('character_slot');
+    expect(editableBasisRotation(doc, chassis)).toBe(0);
+    expect(editableBasisRotation(doc, plain)).toBe(0);
+    expect(editableBasisRotation(doc, attached)).toBeCloseTo(0.5);
+  });
+  it('父炮塔 90° 时子炮塔世界 +X 拖拽写回 local +Z', () => {
+    const doc = new SourceDocument('<vehicle><turret offset="0 0 0" rotation="1.5707963267948966"/><turret offset="0 0 0" parent_turret_index="0"/></vehicle>');
+    const turrets = doc.root!.children.filter((n) => n.name === 'turret');
+    const basis = editableBasisRotation(doc, turrets[1]);
+    expect(basis).toBeCloseTo(Math.PI / 2);
+    const local = rotateY([1, 0, 0], -basis);
+    expect(local[0]).toBeCloseTo(0);
+    expect(local[1]).toBeCloseTo(0);
+    expect(local[2]).toBeCloseTo(1);
   });
 });

@@ -106,6 +106,27 @@ export function characterSlotPose(doc: SourceDocument, slot: SourceNode, turrets
   };
 }
 
+/**
+ * Accumulated world rotation (radians, around Y) of the coordinate system in
+ * which a node's editable position is expressed. The transform gizmo applies
+ * the inverse of this to convert a world-space drag delta back into the local
+ * XML delta before writing it.
+ */
+export function editableBasisRotation(doc: SourceDocument, node: SourceNode): number {
+  const turrets = doc.root?.children.filter((n) => n.name === 'turret') ?? [];
+  if (node.name === 'character_slot') return characterSlotPose(doc, node, turrets).attachmentRotation;
+  if (node.name === 'visual' && doc.value(node, 'class') === 'turret') {
+    const index = Number.parseInt(doc.value(node, 'turret_index') ?? '0', 10);
+    return turretWorldPose(doc, turrets, index)?.rotation ?? 0;
+  }
+  if (node.name === 'turret') {
+    const parentIndex = integerIndex(doc.value(node, 'parent_turret_index'));
+    if (parentIndex === null || parentIndex === turrets.indexOf(node)) return 0;
+    return turretWorldPose(doc, turrets, parentIndex)?.rotation ?? 0;
+  }
+  return 0;
+}
+
 export function rotateY(value: Vec3, angle: number): Vec3 {
   const cosine = Math.cos(angle), sine = Math.sin(angle);
   return [cosine * value[0] + sine * value[2], value[1], -sine * value[0] + cosine * value[2]];

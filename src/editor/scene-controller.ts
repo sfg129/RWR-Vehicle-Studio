@@ -5,7 +5,7 @@ import { desktop } from '../platform/desktop-api';
 import { parseOgreMesh, type OgreMesh } from '../core/ogre/mesh-reader';
 import type { SourceDocument, SourceNode } from '../core/xml/source-document';
 import type { ResourceCatalog } from '../core/resources/resource-catalog';
-import { characterSlotHidden, characterSlotPose, idleState, rotateY, tireVisualPosition, turretWorldPose, visualMatchesDamageState, WEAPON_LOGICAL_TO_MODEL_YAW } from '../core/vehicle/vehicle-model';
+import { characterSlotHidden, characterSlotPose, editableBasisRotation, idleState, rotateY, tireVisualPosition, turretWorldPose, visualMatchesDamageState, WEAPON_LOGICAL_TO_MODEL_YAW } from '../core/vehicle/vehicle-model';
 import { vec3, type Vec3 } from '../core/math';
 import { SoldierAssets, SOLDIER_GAME_SCALE, rwrLinearToDisplay, type SoldierAnimation } from '../core/soldier/soldier-assets';
 import { parseStaticVoxelModel, type StaticVoxel } from '../core/voxel/voxel-model';
@@ -86,8 +86,7 @@ export class SceneController {
     const target = editablePosition(this.doc, node); if (!target) return;
     const world = object?.position.clone() ?? new THREE.Vector3(...target.value);
     this.proxy.position.copy(world); this.scene.add(this.proxy); this.transform.attach(this.proxy);
-    const turrets = this.doc.root?.children.filter((n) => n.name === 'turret') ?? [];
-    const basisRotation = node.name === 'character_slot' ? characterSlotPose(this.doc, node, turrets).attachmentRotation : 0;
+    const basisRotation = editableBasisRotation(this.doc, node);
     this.drag = { node: target.node, attr: target.attr, value: target.value, start: world.clone(), basisRotation };
   }
   resetCamera(): void { this.camera.position.set(14, 10, 17); this.controls.target.set(0, 1.5, 0); this.controls.update(); }
