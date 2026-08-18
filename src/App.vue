@@ -410,7 +410,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keydown));
     </section>
 
     <footer class="statusbar"><span>{{ status }}</span><span>{{ opened?.path ?? '' }}</span></footer>
-    <ResourceDialog v-if="resourceDialog" :catalog="catalog" :support-model="supportModel" :support-animations="supportAnimations" @close="resourceDialog = false" @apply="resourcesApplied" />
-    <OverrideDialog v-if="overrideDialog" :catalog="catalog" @close="overrideDialog = false" @changed="overrideChanged" />
+    <Transition name="modal"><ResourceDialog v-if="resourceDialog" :catalog="catalog" :support-model="supportModel" :support-animations="supportAnimations" @close="resourceDialog = false" @apply="resourcesApplied" /></Transition>
+    <Transition name="modal"><OverrideDialog v-if="overrideDialog" :catalog="catalog" @close="overrideDialog = false" @changed="overrideChanged" /></Transition>
   </main>
 </template>
