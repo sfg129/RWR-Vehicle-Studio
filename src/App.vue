@@ -10,7 +10,7 @@ import { sceneEntries, type SceneEntry } from './core/vehicle/vehicle-model';
 import { composeVehicle, vehicleBaseReference, type VehicleComposition } from './core/vehicle/vehicle-composition';
 import { SoldierAssets } from './core/soldier/soldier-assets';
 import { loadSoldierAssets } from './core/soldier/soldier-loader';
-import { vec3Text } from './core/math';
+import { isValidNumber, isValidVec3, vec3Text } from './core/math';
 import {
   BUILTIN_SUPPORT_ANIMATIONS,
   BUILTIN_SUPPORT_MODEL,
@@ -55,6 +55,10 @@ const fields = computed(() => {
   const nodes = [node, ...node.children.filter((n) => ['state', 'turret', 'part'].includes(n.name))];
   return nodes.flatMap((n) => n.attributes.map((a) => ({ node: n, sourceNode: composition?.editableNode(n), attr: a.name, value: previewDocument.value!.value(n, a.name) ?? '', inherited: composition?.inherited(n) ?? false, section: n === node ? node.name : `${n.name}${previewDocument.value!.value(n, 'class') ? `:${previewDocument.value!.value(n, 'class')}` : ''}` })));
 });
+const rootFields = computed(() => {
+  const root = previewDocument.value?.root; if (!root) return [];
+  return root.attributes.map((a) => ({ node: root, sourceNode: composition?.rootSource && !composition.rootInheritedAttrs.has(a.name) ? composition.rootSource : undefined, attr: a.name, value: previewDocument.value!.value(root, a.name) ?? '', inherited: composition ? composition.rootInheritedAttrs.has(a.name) : false, section: 'vehicle' }));
+});
 const dirty = computed(() => { void revision.value; return document.value ? document.value.serialize() !== savedText.value : false; });
 const weaponDirty = computed(() => { void weaponRevision.value; return !!weaponSession.value && weaponSession.value.document.serialize() !== weaponSession.value.savedText; });
 const anyDirty = computed(() => dirty.value || weaponDirtyCount.value > 0);
@@ -88,6 +92,7 @@ let vehicleLoadToken = 0;
 async function loadOpenedVehicle(file: OpenedFile) {
   const token = ++vehicleLoadToken;
   opened.value = file; document.value = new SourceDocument(file.text); savedText.value = file.text; undoStack.value = []; missing.value = []; collapsedGroups.clear();
+  if (document.value.structuralErrors.length) status.value = `已打开 ${file.name}；检测到 ${document.value.structuralErrors.length} 处 XML 结构问题（保存时会提示）`;
   await resolveAutomaticBase(token);
   if (token !== vehicleLoadToken) return;
   rebuildPreview(false);
@@ -313,6 +318,8 @@ async function validate() {
   ];
 }
 const RESOURCE_ATTRS = new Set(['mesh_filename', 'texture_filename', 'weapon_key']);
+const VEC3_ATTRS = new Set(['offset', 'position', 'extent', 'visual_offset', 'collision_model_pos', 'collision_model_extent', 'seat_position', 'enter_position', 'weapon_offset']);
+const NUMBER_ATTRS = new Set(['rotation', 'mass', 'speed', 'radius', 'turn_speed', 'turret_index', 'parent_turret_index', 'attached_on_turret', 'animation_id']);
 let validateTimer: number | undefined;
 function scheduleValidate() {
   if (validateTimer !== undefined) window.clearTimeout(validateTimer);
@@ -329,10 +336,18 @@ function undoWeapon(session: WeaponSession) {
   session.undoStack = session.undoStack.slice(0, -1); session.document = new SourceDocument(previous); session.document.restoreSaved(session.savedText);
   catalog.setWeaponPreview(session.key, session.path, session.document.serialize()); weaponRevision.value++; updateWeaponDirtyCount(); revision.value++; status.value = `已撤销武器修改：${session.name}`;
 }
-function edit(field: { sourceNode?: SourceNode; attr: string }, event: Event) {
+async function edit(field: { sourceNode?: SourceNode; attr: string; node?: SourceNode }, event: Event) {
   if (!document.value || !field.sourceNode) { status.value = '该属性继承自基础载具；请打开基础文件后编辑'; return; }
   const value = (event.target as HTMLInputElement).value; if (document.value.value(field.sourceNode, field.attr) === value) return;
-  recordUndo(); document.value.set(field.sourceNode, field.attr, value); rebuildPreview(); if (RESOURCE_ATTRS.has(field.attr)) scheduleValidate();
+  if (VEC3_ATTRS.has(field.attr) && !isValidVec3(value)) { status.value = `${field.attr} 需要 3 个数字（x y z），已忽略本次输入`; return; }
+  if (NUMBER_ATTRS.has(field.attr) && !isValidNumber(value)) { status.value = `${field.attr} 需要数字，已忽略本次输入`; return; }
+  recordUndo(); document.value.set(field.sourceNode, field.attr, value);
+  if (field.attr === 'file' && field.node === previewDocument.value?.root) {
+    await resolveAutomaticBase(); rebuildPreview(false); scheduleValidate();
+    status.value = baseError.value ? `基础载具解析失败：${baseError.value}` : `已更新基础载具引用：${value || '（无）'}`;
+    return;
+  }
+  rebuildPreview(); if (RESOURCE_ATTRS.has(field.attr)) scheduleValidate();
 }
 function move(node: SourceNode, attr: string, value: [number, number, number], needsRebuild: boolean) {
   if (!document.value) return; const sourceNode = composition?.editableNode(node);
@@ -377,6 +392,11 @@ function undo() {
 }
 async function save(saveAs = false) {
   if (!document.value || !opened.value || saving.value) return;
+  const structuralErrors = document.value.structuralErrors;
+  if (structuralErrors.length) {
+    const detail = structuralErrors.slice(0, 5).join('\n');
+    if (!confirm(`该载具 XML 存在结构问题，保存后可能无法在游戏中加载：\n${detail}\n\n仍要保存吗？`)) { status.value = `已取消保存：存在 ${structuralErrors.length} 处 XML 结构问题`; return; }
+  }
   saving.value = true;
   try {
     if (!saveAs) {
@@ -483,6 +503,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keydown));
       <aside class="inspector">
         <div class="panel-title"><small>INSPECTOR</small><h2>{{ selected?.label ?? '属性编辑' }}</h2></div>
         <p class="muted">数值修改即时进入预览；位置也可在视口拖动三轴箭头。保存只写载具 XML。</p>
+        <div v-if="rootFields.length" class="field-list root-fields">
+          <small class="root-heading">载具根元素</small>
+          <label v-for="field in rootFields" class="field-row" :key="`root:${field.attr}`">
+            <span class="ellipsis"><small>vehicle{{ field.inherited ? ' · 基础只读' : '' }}</small>{{ field.attr }}</span>
+            <input :value="field.value" :disabled="!field.sourceNode" @change="edit(field, $event)" />
+            <button class="field-delete" :disabled="!field.sourceNode" :title="`删除 ${field.attr}`" @click="deleteAttribute(field)">×</button>
+          </label>
+        </div>
         <div v-if="!selected" class="empty-state">从场景对象中选择一项。</div>
         <div v-else class="field-list">
           <label v-for="field in fields" class="field-row" :key="`${field.node.id}:${field.attr}`">

@@ -4,6 +4,8 @@ export interface VehicleComposition {
   document: SourceDocument;
   editableNode(previewNode: SourceNode): SourceNode | undefined;
   inherited(previewNode: SourceNode): boolean;
+  rootSource?: SourceNode;
+  rootInheritedAttrs: Set<string>;
 }
 
 export function vehicleBaseReference(document: SourceDocument): string | undefined {
@@ -37,7 +39,12 @@ export function composeVehicle(base: SourceDocument | undefined, leaf: SourceDoc
   }
   for (const child of leaf.root.children) if (!usedLeaf.has(child.id)) parts.push(markedRaw(leaf, child, `leaf:${child.id}`));
 
-  const preview = new SourceDocument(`<vehicle>${parts.join('')}</vehicle>`);
+  // Root attribute composition: leaf overrides base; base-only attributes remain inherited (RV-034).
+  const rootAttrs = new Map<string, { value: string; inherited: boolean }>();
+  for (const attr of base.root.attributes) rootAttrs.set(attr.name, { value: base.value(base.root, attr.name) ?? attr.value, inherited: true });
+  for (const attr of leaf.root.attributes) rootAttrs.set(attr.name, { value: leaf.value(leaf.root, attr.name) ?? attr.value, inherited: false });
+  const rootAttrText = [...rootAttrs.entries()].map(([name, info]) => ` ${name}="${escapeAttr(info.value)}"`).join('');
+  const preview = new SourceDocument(`<vehicle${rootAttrText}>${parts.join('')}</vehicle>`);
   const editableByPreviewId = new Map<number, SourceNode>();
   const inheritedIds = new Set<number>();
   const baseNodes = new Map(base.nodes.map((node) => [node.id, node]));
@@ -51,15 +58,19 @@ export function composeVehicle(base: SourceDocument | undefined, leaf: SourceDoc
     if (!source) continue;
     mapSubtree(child, source, kind === 'leaf' ? editableByPreviewId : undefined, inheritedIds, kind === 'base');
   }
+  const rootInheritedAttrs = new Set<string>();
+  for (const [name, info] of rootAttrs) if (info.inherited) rootInheritedAttrs.add(name);
   return {
     document: preview,
     editableNode: (node) => editableByPreviewId.get(node.id),
     inherited: (node) => inheritedIds.has(node.id),
+    rootSource: leaf.root,
+    rootInheritedAttrs,
   };
 }
 
 function directComposition(document: SourceDocument): VehicleComposition {
-  return { document, editableNode: (node) => node, inherited: () => false };
+  return { document, editableNode: (node) => node, inherited: () => false, rootSource: document.root, rootInheritedAttrs: new Set() };
 }
 
 function markedRaw(document: SourceDocument, node: SourceNode, marker: string): string {
@@ -67,6 +78,10 @@ function markedRaw(document: SourceDocument, node: SourceNode, marker: string): 
   const nameEnd = raw.search(/[\s/>]/);
   if (nameEnd < 0) return raw;
   return `${raw.slice(0, nameEnd)} ${ORIGIN_ATTRIBUTE}="${marker}"${raw.slice(nameEnd)}`;
+}
+
+function escapeAttr(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;');
 }
 
 function mapSubtree(preview: SourceNode, source: SourceNode, editable: Map<number, SourceNode> | undefined, inherited: Set<number>, isInherited: boolean): void {

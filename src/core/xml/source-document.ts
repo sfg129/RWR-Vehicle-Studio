@@ -24,6 +24,8 @@ export interface SourceNode {
 export class SourceDocument {
   readonly roots: SourceNode[] = [];
   readonly nodes: SourceNode[] = [];
+  /** Structural diagnostics (mismatched / unclosed tags) detected while parsing; empty when well-formed. */
+  readonly structuralErrors: string[] = [];
   private changes = new Map<string, string>();
   private saved: string;
   private serializedCache: string | undefined;
@@ -158,6 +160,7 @@ export class SourceDocument {
 
   private parse(): void {
     const stack: SourceNode[] = [];
+    this.structuralErrors.length = 0;
     let i = 0;
     while (i < this.source.length) {
       const start = this.source.indexOf('<', i);
@@ -168,7 +171,14 @@ export class SourceDocument {
       const end = scanTagEnd(this.source, start);
       if (end < start) throw new Error('XML 起始标签未闭合');
       const inner = this.source.slice(start + 1, end);
-      if (inner.startsWith('/')) { const closed = stack.pop(); if (closed) { closed.endTagStart = start; closed.endTagEnd = end + 1; } i = end + 1; continue; }
+      if (inner.startsWith('/')) {
+        const closingName = inner.slice(1).trim().split(/\s+/)[0] ?? '';
+        const open = stack.at(-1);
+        if (!open) this.structuralErrors.push(`意外的闭合标签 </${closingName}>`);
+        else if (open.name !== closingName) this.structuralErrors.push(`标签不匹配：<${open.name}> 被 </${closingName}> 闭合`);
+        const closed = stack.pop(); if (closed) { closed.endTagStart = start; closed.endTagEnd = end + 1; }
+        i = end + 1; continue;
+      }
       const nameMatch = inner.match(/^\s*([\w:.-]+)/);
       if (!nameMatch) { i = end + 1; continue; }
       const name = nameMatch[1];
@@ -191,7 +201,7 @@ export class SourceDocument {
       if (!node.selfClosing) stack.push(node);
       i = end + 1;
     }
-    for (const unclosed of stack) unclosed.endTagEnd = this.source.length;
+    for (const unclosed of stack) { unclosed.endTagEnd = this.source.length; this.structuralErrors.push(`标签未闭合：<${unclosed.name}>`); }
   }
 }
 

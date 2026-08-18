@@ -4,7 +4,9 @@ import { SourceDocument } from '../src/core/xml/source-document';
 import { parseWeaponDefinition, ResourceCatalog } from '../src/core/resources/resource-catalog';
 import { parseStaticVoxelModel } from '../src/core/voxel/voxel-model';
 import { localDragValue, visualMatchesDamageState, weaponExtentToModel, weaponLogicalToModel, WEAPON_LOGICAL_TO_MODEL_YAW } from '../src/core/vehicle/vehicle-model';
+import { composeVehicle } from '../src/core/vehicle/vehicle-composition';
 import { desktop } from '../src/platform/desktop-api';
+import { isValidNumber, isValidVec3 } from '../src/core/math';
 import { SoldierAssets } from '../src/core/soldier/soldier-assets';
 import { loadSoldierAssets } from '../src/core/soldier/soldier-loader';
 
@@ -301,5 +303,62 @@ describe('局部拖拽增量写回（RV-025）', () => {
     // basis 0：world delta 直接叠加
     const c = localDragValue([1, 2, 3], 0, [0, 0, 0]);
     expect(c[0]).toBeCloseTo(1); expect(c[1]).toBeCloseTo(2); expect(c[2]).toBeCloseTo(3);
+  });
+});
+
+describe('XML 结构诊断（RV-031）', () => {
+  it('不匹配的闭合标签与未闭合标签会产生 structuralErrors', () => {
+    const mismatched = new SourceDocument('<vehicle><turret></visual></vehicle>');
+    expect(mismatched.structuralErrors.some((e) => e.includes('不匹配'))).toBe(true);
+    const unclosed = new SourceDocument('<vehicle><turret>');
+    expect(unclosed.structuralErrors.some((e) => e.includes('未闭合'))).toBe(true);
+    const orphan = new SourceDocument('<vehicle></vehicle></turret>');
+    expect(orphan.structuralErrors.some((e) => e.includes('意外'))).toBe(true);
+  });
+  it('结构良好的 XML 不产生 structuralErrors，且提交后仍保持良好', () => {
+    const doc = new SourceDocument('<vehicle><turret weapon_key="x"/><visual class="a"/></vehicle>');
+    expect(doc.structuralErrors).toEqual([]);
+    doc.appendChild(doc.root!, 'slot', { position: '0 0 0' });
+    expect(doc.structuralErrors).toEqual([]);
+  });
+});
+
+describe('严格数值/vec3 输入（RV-032）', () => {
+  it('isValidNumber 与 isValidVec3 拒绝非法输入', () => {
+    expect(isValidNumber('1.5')).toBe(true);
+    expect(isValidNumber('-0.25')).toBe(true);
+    expect(isValidNumber('abc')).toBe(false);
+    expect(isValidNumber('')).toBe(false);
+    expect(isValidNumber('1 2')).toBe(false);
+    expect(isValidVec3('1 2 3')).toBe(true);
+    expect(isValidVec3(' 0 -1.5  2 ')).toBe(true);
+    expect(isValidVec3('1 2')).toBe(false);
+    expect(isValidVec3('1 2 abc')).toBe(false);
+    expect(isValidVec3('1 2 3 4')).toBe(false);
+    expect(isValidVec3('')).toBe(false);
+  });
+});
+
+describe('根元素属性合成（RV-034）', () => {
+  it('leaf 根属性覆盖 base，base 独有属性标记为 inherited', () => {
+    const base = new SourceDocument('<vehicle file="pak40_base.vehicle" name="base-name"><visual class="chassis"/></vehicle>');
+    const leaf = new SourceDocument('<vehicle file="pak40_base.vehicle" key="leaf-key"><visual class="chassis"/></vehicle>');
+    const composed = composeVehicle(base, leaf);
+    const root = composed.document.root!;
+    expect(composed.document.value(root, 'file')).toBe('pak40_base.vehicle');
+    expect(composed.document.value(root, 'key')).toBe('leaf-key');
+    expect(composed.document.value(root, 'name')).toBe('base-name');
+    expect(composed.rootSource).toBe(leaf.root);
+    expect(composed.rootInheritedAttrs.has('name')).toBe(true);
+    expect(composed.rootInheritedAttrs.has('key')).toBe(false);
+    expect(composed.rootInheritedAttrs.has('file')).toBe(false);
+  });
+  it('无 base 时根属性直接来自 leaf，且无 inherited', () => {
+    const leaf = new SourceDocument('<vehicle name="solo"><visual class="chassis"/></vehicle>');
+    const composed = composeVehicle(undefined, leaf);
+    expect(composed.document.root?.name).toBe('vehicle');
+    expect(composed.document.value(composed.document.root!, 'name')).toBe('solo');
+    expect(composed.rootSource).toBe(leaf.root);
+    expect(composed.rootInheritedAttrs.size).toBe(0);
   });
 });
