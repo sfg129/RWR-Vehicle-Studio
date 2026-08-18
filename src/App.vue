@@ -36,7 +36,7 @@ const savedWorkspace = loadWorkspacePreferences();
 const vehicleWorkspace = ref<VehicleWorkspace>(); const workspaceError = ref(''); const workspacePanelOpen = ref(savedWorkspace.panelOpen);
 const expandedWorkspacePaths = reactive(new Set<string>(savedWorkspace.expanded));
 const vehicleSchema = ref<VehicleSchema>({ objectTypes: [], attributes: {} }); const newObjectType = ref(''); const newAttribute = ref('');
-interface WeaponSession { key: string; path: string; name: string; document: SourceDocument; savedText: string }
+interface WeaponSession { key: string; path: string; name: string; document: SourceDocument; savedText: string; undoStack: string[] }
 const weaponSessions = new Map<string, WeaponSession>(); const weaponSession = ref<WeaponSession>(); const weaponLoadError = ref(''); const weaponRevision = ref(0); const weaponDirtyCount = ref(0);
 
 const groups = computed(() => {
@@ -193,7 +193,7 @@ async function loadSelectedWeaponEditor() {
     const sessionKey = weapon.sourcePath.toLowerCase(); let session = weaponSessions.get(sessionKey);
     if (!session) {
       const text = await desktop.readText(weapon.sourcePath); if (token !== weaponLoadToken) return;
-      session = { key, path: weapon.sourcePath, name: weapon.sourcePath.replaceAll('\\', '/').split('/').at(-1) ?? key, document: new SourceDocument(text), savedText: text };
+      session = { key, path: weapon.sourcePath, name: weapon.sourcePath.replaceAll('\\', '/').split('/').at(-1) ?? key, document: new SourceDocument(text), savedText: text, undoStack: [] };
       weaponSessions.set(sessionKey, session);
     } else { session.key = key; catalog.setWeaponPreview(key, session.path, session.document.serialize()); }
     weaponSession.value = session; weaponRevision.value++;
@@ -206,15 +206,15 @@ function refreshWeaponPreview() {
 }
 function editShield(node: SourceNode, attr: 'offset' | 'extent', event: Event) {
   const session = weaponSession.value; if (!session) return; const value = (event.target as HTMLInputElement).value;
-  if (session.document.value(node, attr) === value) return; session.document.set(node, attr, value); refreshWeaponPreview();
+  if (session.document.value(node, attr) === value) return; recordWeaponUndo(session); session.document.set(node, attr, value); refreshWeaponPreview();
 }
 function addShield() {
   const session = weaponSession.value; if (!session?.document.root) return;
-  session.document.appendChild(session.document.root, 'shield', { offset: '0 0 0', extent: '1 1 1' }); refreshWeaponPreview(); status.value = `已向 ${session.name} 增加 shield（尚未保存）`;
+  recordWeaponUndo(session); session.document.appendChild(session.document.root, 'shield', { offset: '0 0 0', extent: '1 1 1' }); refreshWeaponPreview(); status.value = `已向 ${session.name} 增加 shield（尚未保存）`;
 }
 function deleteShield(node: SourceNode) {
   const session = weaponSession.value; if (!session) return;
-  session.document.removeNode(node); refreshWeaponPreview(); status.value = `已从 ${session.name} 删除 shield（尚未保存）`;
+  recordWeaponUndo(session); session.document.removeNode(node); refreshWeaponPreview(); status.value = `已从 ${session.name} 删除 shield（尚未保存）`;
 }
 async function saveWeaponShields() { if (weaponSession.value) await saveWeaponSession(weaponSession.value); }
 async function saveWeaponSession(session: WeaponSession) {
@@ -240,7 +240,17 @@ async function reloadWeaponShields() {
 }
 async function validate() { if (previewDocument.value) missing.value = await catalog.missing(previewDocument.value); }
 function select(id: number) { selectedId.value = id; }
-function recordUndo() { if (!document.value) return; const snapshot = document.value.serialize(); if (undoStack.value.at(-1) !== snapshot) undoStack.value = [...undoStack.value.slice(-99), snapshot]; }
+let lastEditedDoc: 'vehicle' | 'weapon' = 'vehicle';
+function recordUndo() { lastEditedDoc = 'vehicle'; if (!document.value) return; const snapshot = document.value.serialize(); if (undoStack.value.at(-1) !== snapshot) undoStack.value = [...undoStack.value.slice(-99), snapshot]; }
+function recordWeaponUndo(session: WeaponSession) {
+  lastEditedDoc = 'weapon'; const snapshot = session.document.serialize();
+  if (session.undoStack.at(-1) !== snapshot) session.undoStack = [...session.undoStack.slice(-99), snapshot];
+}
+function undoWeapon(session: WeaponSession) {
+  const previous = session.undoStack.at(-1); if (!previous) return;
+  session.undoStack = session.undoStack.slice(0, -1); session.document = new SourceDocument(previous);
+  catalog.setWeaponPreview(session.key, session.path, session.document.serialize()); weaponRevision.value++; updateWeaponDirtyCount(); revision.value++; status.value = `已撤销武器修改：${session.name}`;
+}
 function edit(field: { sourceNode?: SourceNode; attr: string }, event: Event) {
   if (!document.value || !field.sourceNode) { status.value = '该属性继承自基础载具；请打开基础文件后编辑'; return; }
   const value = (event.target as HTMLInputElement).value; if (document.value.value(field.sourceNode, field.attr) === value) return;
@@ -278,6 +288,7 @@ function deleteAttribute(field: { sourceNode?: SourceNode; attr: string }) {
   recordUndo(); const name = field.attr; document.value.removeAttribute(field.sourceNode, name); rebuildPreview(); status.value = `已删除属性 ${name}；可用 Ctrl+Z 恢复`;
 }
 function undo() {
+  if (lastEditedDoc === 'weapon' && weaponSession.value && weaponSession.value.undoStack.length) { undoWeapon(weaponSession.value); return; }
   const previous = undoStack.value.at(-1); if (!previous) return;
   undoStack.value = undoStack.value.slice(0, -1); document.value = new SourceDocument(previous); rebuildPreview(); status.value = '已撤销上一次修改';
 }
