@@ -4,18 +4,31 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - release
+      - main
 
-# Builds the app with tauri-action and creates/updates a GitHub release.
-# This project ships Windows NSIS bundles only, so the matrix is Windows.
-# See https://v2.tauri.app/distribute/pipelines/github/
+# Builds the app with tauri-action on every commit to main and publishes a
+# rolling "nightly" GitHub release. A fixed tag is force-pushed and the release
+# is refreshed (not keyed by version tags). See https://v2.tauri.app/distribute/pipelines/github/
 jobs:
   publish-tauri:
     permissions:
       contents: write
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+          - platform: ubuntu-22.04
+          - platform: windows-latest
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
       - name: setup bun
         uses: oven-sh/setup-bun@v2
@@ -37,8 +50,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: app-v__VERSION__ # the action automatically replaces __VERSION__ with the app version.
-          releaseName: 'RWR Vehicle Studio v__VERSION__'
-          releaseBody: 'See the assets to download this version and install.'
-          releaseDraft: true
-          prerelease: false
+          tagName: nightly
+          releaseName: 'RWR Vehicle Studio (nightly)'
+          releaseBody: 'Rolling build from the latest commit on main. Assets are rebuilt and replaced on every push.'
+          releaseDraft: false
+          prerelease: true
