@@ -10,8 +10,8 @@ export interface SourceAttribute {
 
 export interface SourceNode {
   id: number;
-  /** Stable identity for revert across structural edits (survives commit reparse). */
-  originId: number;
+  /** Stable identity for revert across structural edits (survives commit reparse). `null` means the node was created after the last saved baseline. */
+  originId: number | null;
   name: string;
   attributes: SourceAttribute[];
   children: SourceNode[];
@@ -56,23 +56,28 @@ export class SourceDocument {
     this.serializedCache = undefined;
   }
   /** Mark the current working text as the saved snapshot (call after a successful save). */
-  markSaved(): void { this.saved = this.source; }
+  markSaved(): void {
+    this.saved = this.source;
+    // Rebase saved identity: every current node is now part of the saved baseline (R4-002).
+    this.nodes.forEach((node, index) => { node.originId = index; });
+  }
   /** Override the saved snapshot (e.g. after rebuilding the document from an undo snapshot). */
   restoreSaved(snapshot: string): void { this.saved = snapshot; }
   /** Restore this node's subtree to the saved snapshot, preserving pending edits on other nodes. */
   revertNode(node: SourceNode): void {
+    if (node.originId === null) { this.removeNode(node); return; }
     const originId = node.originId;
     const savedDoc = new SourceDocument(this.saved);
-    const savedNode = savedDoc.nodes[originId] ?? savedDoc.nodes.find((n) => n.originId === originId);
+    const savedNode = savedDoc.nodes.find((n) => n.originId === originId);
     if (!savedNode) return;
     const savedRaw = savedDoc.raw(savedNode);
     // Materialize pending edits first so they become part of the source text and are
     // preserved by the subsequent structural replace without path-based reapplication.
     this.materialize();
-    const current = this.nodes[originId] ?? this.nodes.find((n) => n.originId === originId);
+    const current = this.nodes.find((n) => n.originId === originId);
     if (!current) return;
-    this.commit(this.source.slice(0, current.start) + savedRaw + this.source.slice(current.endTagEnd));
-    const restored = this.nodes.find((n) => n.start === current.start) ?? this.nodes[originId];
+    this.commit(this.source.slice(0, current.start) + savedRaw + this.source.slice(current.endTagEnd), [{ start: current.start, originId }]);
+    const restored = this.nodes.find((n) => n.start === current.start) ?? this.nodes.find((n) => n.originId === originId);
     if (restored) restored.originId = originId;
   }
   addAttribute(node: SourceNode, name: string, value = '0'): void {
@@ -83,14 +88,14 @@ export class SourceDocument {
     const closeLength = current.selfClosing ? 2 : 1;
     const insertAt = current.startTagEnd - closeLength;
     const text = `${this.source.slice(0, insertAt)} ${name}="${escapeXml(value, '"')}"${this.source.slice(insertAt)}`;
-    this.commit(text);
+    this.commit(text, [{ start: current.start, originId: current.originId }]);
   }
   removeAttribute(node: SourceNode, attribute: SourceAttribute | string): void {
     const id = node.id; const name = typeof attribute === 'string' ? attribute : attribute.name; this.materialize(); const current = this.nodes[id];
     const target = current?.attributes.find((item) => item.name === name); if (!current || !target) return;
     let start = target.start;
     while (start > current.start && /[ \t]/.test(this.source[start - 1])) start--;
-    this.commit(this.source.slice(0, start) + this.source.slice(target.end));
+    this.commit(this.source.slice(0, start) + this.source.slice(target.end), [{ start: current.start, originId: current.originId }]);
   }
   appendChild(parent: SourceNode, name: string, attributes: Record<string, string> = {}): void {
     const id = parent.id; this.materialize(); const current = this.nodes[id];
@@ -100,16 +105,17 @@ export class SourceDocument {
       if (!/^[A-Za-z_:][\w:.-]*$/.test(attribute)) throw new Error(`无效的属性名称：${attribute}`);
       return ` ${attribute}="${escapeXml(value, '"')}"`;
     }).join('');
+    const eol = this.detectEol();
     const parentIndent = lineIndent(this.source, current.start); const childIndent = `${parentIndent}  `;
     if (current.selfClosing) {
       const insertAt = current.startTagEnd - 2;
-      const replacement = `>\n${childIndent}<${name}${attributeText} />\n${parentIndent}</${current.name}>`;
-      this.commit(this.source.slice(0, insertAt) + replacement + this.source.slice(current.startTagEnd));
+      const replacement = `>${eol}${childIndent}<${name}${attributeText} />${eol}${parentIndent}</${current.name}>`;
+      this.commit(this.source.slice(0, insertAt) + replacement + this.source.slice(current.startTagEnd), [{ start: current.start, originId: current.originId }]);
       return;
     }
     const insertAt = current.endTagStart;
-    const prefix = insertAt > 0 && this.source[insertAt - 1] === '\n' ? '' : '\n';
-    this.commit(this.source.slice(0, insertAt) + `${prefix}${childIndent}<${name}${attributeText} />\n${parentIndent}` + this.source.slice(insertAt));
+    const prefix = insertAt > 0 && this.source[insertAt - 1] === '\n' ? '' : eol;
+    this.commit(this.source.slice(0, insertAt) + `${prefix}${childIndent}<${name}${attributeText} />${eol}${parentIndent}` + this.source.slice(insertAt), [{ start: current.start, originId: current.originId }]);
   }
   removeNode(node: SourceNode): void {
     const id = node.id; this.materialize(); const current = this.nodes[id]; if (!current) return;
@@ -118,16 +124,25 @@ export class SourceDocument {
     if (/^[ \t]*$/.test(this.source.slice(lineStart, start))) start = lineStart;
     if (this.source[end] === '\r' && this.source[end + 1] === '\n') end += 2;
     else if (this.source[end] === '\n') end += 1;
-    this.commit(this.source.slice(0, start) + this.source.slice(end));
+    const removedLength = end - start;
+    const anchors = this.nodes
+      .filter((n) => n.endTagEnd <= start || n.start >= end)
+      .map((n) => ({ start: n.start >= end ? n.start - removedLength : n.start, originId: n.originId }));
+    this.commit(this.source.slice(0, start) + this.source.slice(end), anchors);
   }
-  commit(serialized: string): void {
+  commit(serialized: string, anchors: { start: number; originId: number | null }[] = []): void {
     const oldNodes = this.nodes.map((node) => ({ raw: this.currentRaw(node), originId: node.originId }));
     this.source = serialized; this.changes.clear(); this.roots.length = 0; this.nodes.length = 0; this.serializedCache = undefined; this.parse();
-    const byRaw = new Map<string, number[]>();
+    for (const node of this.nodes) node.originId = null;
+    const byRaw = new Map<string, (number | null)[]>();
     for (const old of oldNodes) { const queue = byRaw.get(old.raw); if (queue) queue.push(old.originId); else byRaw.set(old.raw, [old.originId]); }
     for (const node of this.nodes) {
       const queue = byRaw.get(this.currentRaw(node));
       if (queue && queue.length) node.originId = queue.shift()!;
+    }
+    for (const anchor of anchors) {
+      const target = this.nodes.find((n) => n.start === anchor.start);
+      if (target) target.originId = anchor.originId;
     }
   }
 
@@ -168,6 +183,8 @@ export class SourceDocument {
 
   private materialize(): void { if (this.dirty) this.commit(this.serialize()); }
 
+  private detectEol(): string { return this.source.includes('\r\n') ? '\r\n' : '\n'; }
+
   private parse(): void {
     const stack: SourceNode[] = [];
     this.structuralErrors.length = 0;
@@ -175,9 +192,21 @@ export class SourceDocument {
     while (i < this.source.length) {
       const start = this.source.indexOf('<', i);
       if (start < 0) break;
-      if (this.source.startsWith('<!--', start)) { const end = this.source.indexOf('-->', start + 4); i = end < 0 ? this.source.length : end + 3; continue; }
-      if (this.source.startsWith('<![CDATA[', start)) { const end = this.source.indexOf(']]>', start + 9); i = end < 0 ? this.source.length : end + 3; continue; }
-      if (this.source[start + 1] === '?' || this.source[start + 1] === '!') { i = scanTagEnd(this.source, start) + 1; continue; }
+      if (this.source.startsWith('<!--', start)) {
+        const end = this.source.indexOf('-->', start + 4);
+        if (end < 0) { this.structuralErrors.push('XML 注释未闭合'); break; }
+        i = end + 3; continue;
+      }
+      if (this.source.startsWith('<![CDATA[', start)) {
+        const end = this.source.indexOf(']]>', start + 9);
+        if (end < 0) { this.structuralErrors.push('XML CDATA 未闭合'); break; }
+        i = end + 3; continue;
+      }
+      if (this.source[start + 1] === '?' || this.source[start + 1] === '!') {
+        const end = scanTagEnd(this.source, start);
+        if (end < start) { this.structuralErrors.push('XML 声明或处理指令未闭合'); break; }
+        i = end + 1; continue;
+      }
       const end = scanTagEnd(this.source, start);
       if (end < start) throw new Error('XML 起始标签未闭合');
       const inner = this.source.slice(start + 1, end);

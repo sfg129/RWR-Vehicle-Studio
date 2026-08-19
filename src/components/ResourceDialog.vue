@@ -54,9 +54,9 @@ async function apply() {
   const token = ++applyToken;
   indexing.value = true; busy.value = '正在递归建立资源索引…';
   try {
-    await props.catalog.applyFolders({ ...folders }, true);
+    const selection = cloneResourceSelection(currentSelection());
+    await props.catalog.applyFolders(selection.folders, true);
     if (token !== applyToken) return;
-    const selection = currentSelection();
     saveResourcePreferences({ presets: presets.value, activePresetId: selectedPresetId.value, lastSelection: cloneResourceSelection(selection) });
     emit('apply', selection);
   } catch (error) {
@@ -71,6 +71,7 @@ async function apply() {
   <div class="modal-backdrop"><section class="dialog resource-dialog">
     <header><div><small>RESOURCE WORKSPACE</small><h2>资源文件夹与人物预览</h2></div><button class="icon" :disabled="indexing" @click="$emit('close')">×</button></header>
     <p class="muted">选择三个上层文件夹后会递归索引同名资源；不要求逐个选取。单文件例外请在主界面“文件覆盖”中指定。</p>
+    <fieldset class="dialog-fields" :disabled="indexing">
     <section class="preset-box">
       <strong>资源路径预设</strong>
       <div class="field-row preset-row"><select v-model="selectedPresetId" @change="presetName = selectedPreset?.name ?? ''"><option value="">选择已保存预设</option><option v-for="preset in presets" :key="preset.id" :value="preset.id">{{ preset.name }}</option></select><button :disabled="!selectedPreset" @click="loadPreset">载入预设</button><button :disabled="!selectedPreset" @click="removePreset">删除</button></div>
@@ -83,6 +84,7 @@ async function apply() {
     <hr />
     <label class="field-row path-row support-row"><span>乘员模型</span><input :value="supportLabel(model, 'model')" readonly /><button @click="support('model')">更改</button><button :disabled="model === BUILTIN_SUPPORT_MODEL" @click="restoreSupport('model')">恢复默认</button></label>
     <label class="field-row path-row support-row"><span>动画文件</span><input :value="supportLabel(animations, 'animation')" readonly /><button @click="support('animation')">更改</button><button :disabled="animations === BUILTIN_SUPPORT_ANIMATIONS" @click="restoreSupport('animation')">恢复默认</button></label>
+    </fieldset>
     <footer><span class="muted">{{ busy }}</span><button :disabled="indexing" @click="$emit('close')">取消</button><button class="primary" :disabled="indexing" @click="apply">建立索引并载入</button></footer>
   </section></div>
 </template>

@@ -12,8 +12,14 @@ function readSupport(kind: 'model' | 'animation', path: string): Promise<string>
   return path === builtin ? desktop.readBuiltinSupport(kind) : desktop.readText(path);
 }
 
-export function loadSoldierAssets(modelPath: string, animationPath: string): Promise<SoldierAssets> {
+export function invalidateSoldierAssets(modelPath?: string, animationPath?: string): void {
+  if (modelPath && animationPath) { cache.delete(`${modelPath}\u0000${animationPath}`); return; }
+  cache.clear();
+}
+
+export function loadSoldierAssets(modelPath: string, animationPath: string, force = false): Promise<SoldierAssets> {
   const key = `${modelPath}\u0000${animationPath}`;
+  if (force) cache.delete(key);
   const cached = cache.get(key);
   if (cached) return cached;
   const pending = (async () => {

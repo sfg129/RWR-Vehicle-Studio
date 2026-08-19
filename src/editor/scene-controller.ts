@@ -29,7 +29,7 @@ export class SceneController {
   private renderer: THREE.WebGLRenderer; private controls: OrbitControls; private transform: TransformControls;
   private root = new THREE.Group(); private selectedHelper?: THREE.BoxHelper; private proxy = new THREE.Object3D(); private drag?: DragInfo;
   private doc?: SourceDocument; private catalog?: ResourceCatalog; private soldier?: SoldierAssets; private options?: ViewOptions;
-  private meshCache = new Map<string, Promise<OgreMesh>>(); private textureCache = new Map<string, Promise<THREE.Texture>>(); private voxelCache = new Map<string, Promise<StaticVoxel[]>>();
+  private meshCache = new Map<string, Promise<OgreMesh>>(); private textureCache = new Map<string, Promise<THREE.Texture>>(); private voxelCache = new Map<string, Promise<StaticVoxel[]>>(); private resolvedTextures = new Set<THREE.Texture>(); private resolvedTexturePaths = new Map<THREE.Texture, string>();
   private geometryCache = new Map<string, THREE.BufferGeometry>(); private sharedAssets = new Set<THREE.BufferGeometry | THREE.Material>();
   private nodeObjects = new Map<number, THREE.Object3D>(); private occupants: Occupant[] = []; private startTime = performance.now();
   private sceneGeneration = 0;
@@ -126,11 +126,20 @@ export class SceneController {
   /** Refresh only the working document reference after a transform-only edit; the scene objects are updated in place (RV-025). */
   updateDocument(doc: SourceDocument): void { this.doc = doc; }
 
+  /** Enable/disable gizmo editing (e.g. while a save is in flight, R4-001). */
+  setEditingEnabled(enabled: boolean): void {
+    this.transform.enabled = enabled;
+    if (!enabled) { this.transform.detach(); this.drag = undefined; }
+  }
+
   /** Drop promise and GPU geometry caches after a forced resource reindex (R3-014/015/016). */
   invalidateAssetCaches(): void {
     this.meshCache.clear();
     this.textureCache.clear();
     this.voxelCache.clear();
+    for (const texture of this.resolvedTextures) texture.dispose();
+    this.resolvedTextures.clear();
+    this.resolvedTexturePaths.clear();
     for (const geometry of this.geometryCache.values()) {
       this.sharedAssets.delete(geometry);
       geometry.dispose();
@@ -162,18 +171,40 @@ export class SceneController {
   topView(): void { this.camera.position.set(0, 28, 0.01); this.controls.target.set(0, 0, 0); this.controls.update(); }
   sideView(): void { this.camera.position.set(28, 4, 0); this.controls.target.set(0, 1.5, 0); this.controls.update(); }
 
-  /** Keep app-lifetime GPU geometry cache bounded; never evict geometries used by the current scene (R3-016). */
+  /** Keep app-lifetime caches bounded; never evict geometries/textures used by the current scene (R3-016 / R4-009c). */
   private enforceAssetLimits(): void {
-    const limit = 256;
-    if (this.geometryCache.size <= limit) return;
-    const used = new Set<THREE.BufferGeometry>();
-    this.root.traverse((object: any) => { if (object.geometry) used.add(object.geometry); });
+    const geometryLimit = 256;
+    const textureLimit = 128;
+    const assetLimit = 128;
+    const usedGeometries = new Set<THREE.BufferGeometry>();
+    const usedTextures = new Set<THREE.Texture>();
+    this.root.traverse((object: any) => {
+      if (object.geometry) usedGeometries.add(object.geometry);
+      const materials = Array.isArray(object.material) ? object.material : object.material ? [object.material] : [];
+      for (const material of materials) if (material?.map) usedTextures.add(material.map);
+    });
     for (const [key, geometry] of this.geometryCache) {
-      if (this.geometryCache.size <= limit) break;
-      if (used.has(geometry)) continue;
+      if (this.geometryCache.size <= geometryLimit) break;
+      if (usedGeometries.has(geometry)) continue;
       this.geometryCache.delete(key);
       this.sharedAssets.delete(geometry);
       geometry.dispose();
+    }
+    for (const [texture, path] of this.resolvedTexturePaths) {
+      if (this.resolvedTexturePaths.size <= textureLimit) break;
+      if (usedTextures.has(texture)) continue;
+      this.resolvedTexturePaths.delete(texture);
+      this.resolvedTextures.delete(texture);
+      this.textureCache.delete(path);
+      texture.dispose();
+    }
+    if (this.meshCache.size > assetLimit) {
+      let extra = this.meshCache.size - assetLimit;
+      for (const key of this.meshCache.keys()) { if (extra <= 0) break; this.meshCache.delete(key); extra--; }
+    }
+    if (this.voxelCache.size > assetLimit) {
+      let extra = this.voxelCache.size - assetLimit;
+      for (const key of this.voxelCache.keys()) { if (extra <= 0) break; this.voxelCache.delete(key); extra--; }
     }
   }
 
@@ -267,12 +298,12 @@ export class SceneController {
   private loadMesh(path: string): Promise<OgreMesh> { return this.loadCached(this.meshCache, path, () => desktop.readBinary(path).then(parseOgreMesh)); }
   private loadVoxels(path: string): Promise<StaticVoxel[]> { return this.loadCached(this.voxelCache, path, () => desktop.readText(path).then(parseStaticVoxelModel)); }
   private loadTexture(path: string): Promise<THREE.Texture> {
+    const ext = path.split('.').at(-1)?.toLowerCase();
+    if (!['png', 'jpg', 'jpeg', 'bmp'].includes(ext ?? '')) return Promise.reject(new Error(`暂不支持浏览器纹理格式 ${ext ?? '未知'}`));
     return this.loadCached(this.textureCache, path, () => desktop.readBinary(path).then((buffer) => new Promise<THREE.Texture>((resolve, reject) => {
-      const ext = path.split('.').at(-1)?.toLowerCase();
-      if (!['png', 'jpg', 'jpeg', 'bmp'].includes(ext ?? '')) { reject(new Error(`暂不支持浏览器纹理格式 ${ext}`)); return; }
       const url = URL.createObjectURL(new Blob([buffer]));
       new THREE.TextureLoader().load(url,
-        (texture) => { URL.revokeObjectURL(url); texture.colorSpace = THREE.SRGBColorSpace; texture.flipY = false; resolve(texture); },
+        (texture) => { URL.revokeObjectURL(url); texture.colorSpace = THREE.SRGBColorSpace; texture.flipY = false; this.resolvedTextures.add(texture); this.resolvedTexturePaths.set(texture, path); resolve(texture); },
         undefined,
         (e) => { URL.revokeObjectURL(url); reject(e); });
     })));

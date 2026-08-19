@@ -6,7 +6,7 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 use walkdir::WalkDir;
 
 #[derive(Default)]
-struct AppState { writable: Mutex<HashSet<PathBuf>> }
+struct AppState { writable: Mutex<HashSet<PathBuf>>, writable_weapons: Mutex<HashSet<PathBuf>> }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -310,25 +310,33 @@ async fn save_vehicle(app: AppHandle, state: State<'_, AppState>, path: String, 
     Ok(Some(SavedFile { name: file_name(&canonical), path: display(&canonical), backup_path: backup.map(|p| display(&p)) }))
 }
 
-#[tauri::command]
-fn save_weapon(path: String, text: String, allowed_roots: Vec<String>) -> Result<SavedFile, String> {
+fn save_weapon_impl(path: String, text: String, state: &AppState) -> Result<SavedFile, String> {
     let target = PathBuf::from(path).canonicalize().map_err(|e| format!("无法确认武器保存路径：{e}"))?;
     if !target.is_file() || !target.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("weapon")) {
         return Err("拒绝保存：目标不是现有的 .weapon 文件".into())
     }
-    // RV-041: weapon save boundary should be as strict as vehicle save. The frontend
-    // passes the configured weapon folder plus override files; anything outside is rejected.
-    let permitted = allowed_roots.iter().any(|root| {
-        let root_path = PathBuf::from(root);
-        let Ok(root_canon) = root_path.canonicalize() else { return false };
-        if root_canon.is_file() { target == root_canon } else { target.starts_with(&root_canon) }
-    });
-    if !permitted {
-        return Err("拒绝保存：该武器路径不在当前资源配置的允许范围内".into())
+    if !state.writable_weapons.lock().map_err(|_| "武器写入权限状态不可用")?.contains(&target) {
+        return Err("拒绝保存：该武器文件不是本次会话打开的武器".into())
     }
     let backup = write_backup(&target)?;
     atomic_write(&target, text.as_bytes())?;
     Ok(SavedFile { name: file_name(&target), path: display(&target), backup_path: backup.map(|p| display(&p)) })
+}
+
+#[tauri::command]
+fn register_weapon_session(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    let canonical = PathBuf::from(path).canonicalize().map_err(|e| format!("无法确认武器路径：{e}"))?;
+    if !canonical.is_file() || !canonical.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("weapon")) {
+        return Err("拒绝注册：目标不是现有的 .weapon 文件".into())
+    }
+    state.writable_weapons.lock().map_err(|_| "武器写入权限状态不可用")?.insert(canonical);
+    Ok(())
+}
+
+#[tauri::command]
+fn save_weapon(path: String, text: String, state: State<'_, AppState>) -> Result<SavedFile, String> {
+    let state_ref = state.inner();
+    save_weapon_impl(path, text, state_ref)
 }
 
 /// Keep a rolling chain of backups (`.bak`, `.bak1`, `.bak2`); returns the newest backup path.
@@ -471,11 +479,24 @@ mod tests {
     }
 
     #[test]
+    fn weapon_save_rejects_unregistered_session() {
+        let unique = format!("rwrstudio-weapon-auth-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let path = std::env::temp_dir().join(format!("{unique}.weapon"));
+        fs::write(&path, "<weapon/>").unwrap();
+        let state = AppState::default();
+        let result = save_weapon_impl(display(&path), "<weapon/>".into(), &state);
+        assert!(matches!(result, Err(ref e) if e.contains("不是本次会话打开的武器")));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn weapon_save_creates_backup_and_replaces_text() {
         let unique = format!("rwrstudio-weapon-save-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
         let path = std::env::temp_dir().join(format!("{unique}.weapon")); let backup = PathBuf::from(format!("{}.bak", display(&path)));
         fs::write(&path, "<weapon><shield offset=\"0 0 0\" extent=\"1 1 1\"/></weapon>").unwrap();
-        let saved = save_weapon(display(&path), "<weapon><shield offset=\"1 2 3\" extent=\"4 5 6\"/></weapon>".into(), vec![display(&path)]).unwrap();
+        let state = AppState::default();
+        state.writable_weapons.lock().unwrap().insert(path.canonicalize().unwrap());
+        let saved = save_weapon_impl(display(&path), "<weapon><shield offset=\"1 2 3\" extent=\"4 5 6\"/></weapon>".into(), &state).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "<weapon><shield offset=\"1 2 3\" extent=\"4 5 6\"/></weapon>");
         assert!(fs::read_to_string(&backup).unwrap().contains("offset=\"0 0 0\"")); assert!(saved.backup_path.as_deref().is_some_and(|value| value.ends_with(".weapon.bak")));
         let _ = fs::remove_file(path); let _ = fs::remove_file(backup);
@@ -486,7 +507,9 @@ mod tests {
         let unique = format!("rwrstudio-rolling-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
         let path = std::env::temp_dir().join(format!("{unique}.weapon"));
         fs::write(&path, "<weapon>v0</weapon>").unwrap();
-        for v in 1..=4 { save_weapon(display(&path), format!("<weapon>v{v}</weapon>"), vec![display(&path)]).unwrap(); }
+        let state = AppState::default();
+        state.writable_weapons.lock().unwrap().insert(path.canonicalize().unwrap());
+        for v in 1..=4 { save_weapon_impl(display(&path), format!("<weapon>v{v}</weapon>"), &state).unwrap(); }
         assert_eq!(fs::read_to_string(&path).unwrap(), "<weapon>v4</weapon>");
         let bak = PathBuf::from(format!("{}.bak", display(&path)));
         let bak1 = PathBuf::from(format!("{}.bak1", display(&path)));
@@ -517,7 +540,7 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![open_vehicle, open_vehicle_path, resolve_vehicle_base, choose_vehicle_base, choose_vehicle_workspace, scan_vehicle_workspace, scan_vehicle_schema, list_workspace_dir,
             choose_folder, choose_override_file, choose_support_file,
-            scan_resource_folder, read_text_path, read_builtin_support, read_binary_base64, save_vehicle, save_weapon])
+            scan_resource_folder, read_text_path, read_builtin_support, read_binary_base64, save_vehicle, register_weapon_session, save_weapon])
         .run(tauri::generate_context!())
         .expect("RWR Vehicle Studio failed to start");
 }
