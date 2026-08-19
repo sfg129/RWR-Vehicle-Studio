@@ -16,21 +16,16 @@ describe('nightly publish workflow（R3-019/020/021/022/023 / R4-007）', () => 
     expect(publish).toContain('cancel-in-progress: true');
   });
 
-  it('先构建全部平台并上传 artifact，最后由单一 job retarget tag 并发布 release', () => {
+  it('使用 tauri-action 发布/覆盖 rolling nightly release', () => {
     const publish = workflow('publish.yml');
-    const build = publish.indexOf('build-tauri:');
-    const finalize = publish.indexOf('finalize-release:');
-    expect(build).toBeGreaterThanOrEqual(0);
-    expect(finalize).toBeGreaterThan(build);
-    expect(publish).toContain('needs: build-tauri');
-    expect(publish).toContain('actions/upload-artifact@v4');
-    expect(publish).toContain('actions/download-artifact@v4');
-    expect(publish).toContain('gh release upload nightly');
-    expect(publish).toContain('--clobber');
-    // tag retarget 只能出现在 finalize job 之后
-    expect(publish.indexOf('git tag -f nightly "$HEAD_SHA"')).toBeGreaterThan(finalize);
-    expect(publish.indexOf('git push -f origin "refs/tags/nightly"')).toBeGreaterThan(finalize);
-    expect(publish).not.toContain('tagName: nightly');
+    expect(publish).toContain('tauri-apps/tauri-action@v1');
+    expect(publish).toContain('tagName: nightly');
+    expect(publish).toContain("releaseName: 'RWR Vehicle Studio (nightly)'");
+    expect(publish).toContain('releaseDraft: false');
+    expect(publish).toContain('prerelease: true');
+    expect(publish).not.toContain('gh release upload nightly');
+    expect(publish).not.toContain('actions/upload-artifact@v4');
+    expect(publish).not.toContain('actions/download-artifact@v4');
   });
 
   it('Linux AppImage 依赖与 Bun 版本固定（R3-022/023）', () => {
