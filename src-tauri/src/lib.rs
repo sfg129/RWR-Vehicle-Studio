@@ -76,7 +76,7 @@ fn resolve_vehicle_base_candidate(current: &Path, reference: &str) -> Result<Opt
     }
     let candidate = match candidate.canonicalize() { Ok(value) => value, Err(_) => return Ok(None) };
     if !candidate.starts_with(&parent) { return Err("基础载具引用超出当前载具目录".into()); }
-    if !candidate.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("vehicle") || ext.eq_ignore_ascii_case("xml")) {
+    if !is_vehicle_file(&candidate) {
         return Err("基础载具不是 .vehicle / .xml 文件".into());
     }
     Ok(Some(candidate))
@@ -99,12 +99,12 @@ fn resolve_vehicle_base(app: AppHandle, state: State<'_, AppState>, path: String
 #[tauri::command]
 async fn choose_vehicle_base(app: AppHandle) -> Result<Option<OpenedFile>, String> {
     let picked = receive_file(|done| {
-        app.dialog().file().add_filter("RWR 基础载具", &["vehicle"]).pick_file(done);
+        app.dialog().file().add_filter("RWR 基础载具", &["vehicle", "xml"]).pick_file(done);
     }).await?;
     let Some(picked) = picked else { return Ok(None) };
     let path = local_path(picked)?;
-    if !path.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("vehicle")) {
-        return Err("所选基础文件不是 .vehicle 文件".into());
+    if !is_vehicle_file(&path) {
+        return Err("所选基础文件不是 .vehicle / .xml 文件".into());
     }
     let path = allow_read_file(&app, &path)?;
     Ok(Some(read_vehicle_file(path)?))
@@ -113,7 +113,7 @@ async fn choose_vehicle_base(app: AppHandle) -> Result<Option<OpenedFile>, Strin
 #[tauri::command]
 fn open_vehicle_path(app: AppHandle, state: State<'_, AppState>, path: String) -> Result<OpenedFile, String> {
     let path = require_read_scope(&app, Path::new(&path))?;
-    if !path.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("vehicle") || ext.eq_ignore_ascii_case("xml")) {
+    if !is_vehicle_file(&path) {
         return Err("所选项目不是 .vehicle / .xml 载具文件".into());
     }
     read_opened_vehicle(path, &state)
@@ -124,6 +124,17 @@ fn read_opened_vehicle(path: PathBuf, state: &AppState) -> Result<OpenedFile, St
     let canonical = PathBuf::from(&opened.path).canonicalize().map_err(|e| format!("无法确认文件路径：{e}"))?;
     state.writable.lock().map_err(|_| "文件权限状态不可用")?.insert(canonical);
     Ok(opened)
+}
+
+fn is_vehicle_file(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("vehicle")
+                    || ext.eq_ignore_ascii_case("xml")
+            })
 }
 
 fn read_vehicle_file(path: PathBuf) -> Result<OpenedFile, String> {
@@ -176,7 +187,7 @@ fn schema_fingerprint(root: &Path) -> Result<u64, String> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for entry in WalkDir::new(root).max_depth(13).follow_links(false).into_iter() {
         let entry = match entry { Ok(value) => value, Err(_) => continue };
-        if !entry.file_type().is_file() || !entry.path().extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("vehicle")) { continue }
+        if !is_vehicle_file(entry.path()) { continue }
         let path = entry.path();
         let Ok(meta) = entry.metadata() else { continue };
         path.hash(&mut hasher);
@@ -216,7 +227,7 @@ fn scan_vehicle_schema_root(root: PathBuf) -> Result<VehicleSchema, String> {
     let mut skipped = Vec::new();
     let mut count = 0usize;
     for entry in WalkDir::new(root).max_depth(13).follow_links(false).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() || !entry.path().extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("vehicle")) { continue }
+        if !is_vehicle_file(entry.path()) { continue }
         count += 1; if count > 10_000 { return Err("载具文件超过 10000 个；请选择更具体的工作区".into()) }
         match fs::read(entry.path()).map_err(|e| e.to_string()).and_then(decode_text) {
             Ok(text) => scan_xml_schema(&text, &mut object_types, &mut attributes),
@@ -282,7 +293,7 @@ fn list_dir_entries(path: &Path) -> Result<Vec<VehicleWorkspaceEntry>, String> {
         let metadata = match fs::symlink_metadata(&child) { Ok(value) => value, Err(_) => continue };
         if metadata.file_type().is_symlink() { continue }
         let is_directory = metadata.is_dir();
-        let is_vehicle = metadata.is_file() && child.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("vehicle"));
+        let is_vehicle = is_vehicle_file(&child);
         result.push(VehicleWorkspaceEntry { name: file_name(&child), path: display(&child), is_directory, is_vehicle, children: Vec::new() });
     }
     Ok(result)
@@ -417,9 +428,9 @@ fn save_weapon_impl(path: String, text: String, state: &AppState) -> Result<Save
 }
 
 #[tauri::command]
-fn register_vehicle_session(path: String, state: State<'_, AppState>) -> Result<(), String> {
-    let canonical = PathBuf::from(path).canonicalize().map_err(|e| format!("无法确认载具路径：{e}"))?;
-    if !canonical.is_file() || !canonical.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("vehicle") || ext.eq_ignore_ascii_case("xml")) {
+fn register_vehicle_session(app: AppHandle, path: String, state: State<'_, AppState>) -> Result<(), String> {
+    let canonical = require_read_scope(&app, Path::new(&path))?;
+    if !is_vehicle_file(&canonical) {
         return Err("拒绝注册：目标不是现有的 .vehicle / .xml 载具文件".into())
     }
     state.writable.lock().map_err(|_| "载具写入权限状态不可用")?.insert(canonical);
@@ -427,8 +438,8 @@ fn register_vehicle_session(path: String, state: State<'_, AppState>) -> Result<
 }
 
 #[tauri::command]
-fn register_weapon_session(path: String, state: State<'_, AppState>) -> Result<(), String> {
-    let canonical = PathBuf::from(path).canonicalize().map_err(|e| format!("无法确认武器路径：{e}"))?;
+fn register_weapon_session(app: AppHandle, path: String, state: State<'_, AppState>) -> Result<(), String> {
+    let canonical = require_read_scope(&app, Path::new(&path))?;
     if !canonical.is_file() || !canonical.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("weapon")) {
         return Err("拒绝注册：目标不是现有的 .weapon 文件".into())
     }

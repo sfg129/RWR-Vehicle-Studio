@@ -320,18 +320,28 @@ async function indexRememberedResources(selection: ResourceSelection, token: num
 async function resourcesApplied(selection: ResourceSelection, token = ++vehicleLoadToken, resourceChanged = true) {
   hasRememberedResources.value = true;
   rememberedSelection = cloneResourceSelection(selection); supportModel.value = selection.supportModel; supportAnimations.value = selection.supportAnimations;
-  resourceDialog.value = false; if (resourceChanged) invalidateSoldierAssets(); await loadSoldier(token); if (token !== vehicleLoadToken) return; await validate(); if (token !== vehicleLoadToken) return; if (resourceChanged) resourceGeneration.value++; markSceneChanged(); await loadSelectedWeaponEditor();
+  resourceDialog.value = false; if (resourceChanged) invalidateSoldierAssets(); const soldierLoaded = await loadSoldier(token); if (token !== vehicleLoadToken) return; if (!soldierLoaded) { resourceDialog.value = true; return; } await validate(); if (token !== vehicleLoadToken) return; if (resourceChanged) resourceGeneration.value++; markSceneChanged(); await loadSelectedWeaponEditor();
   const diagnostics = catalog.scanDiagnostics; const total = diagnostics.duplicates.length + diagnostics.warnings.length;
   status.value = `已载入：${entries.value.filter((e) => e.kind === 'visual').length} 个外观，${entries.value.filter((e) => e.kind === 'slot').length} 个乘员位${total ? `；资源扫描发现 ${total} 个问题` : ''}`;
 }
-async function loadSoldier(token = ++vehicleLoadToken) {
-  if (!supportModel.value || !supportAnimations.value) { soldier.value = undefined; return; }
+async function loadSoldier(token = ++vehicleLoadToken): Promise<boolean> {
+  if (!supportModel.value || !supportAnimations.value) {
+    soldier.value = undefined;
+    return true;
+  }
   try {
     const assets = await loadSoldierAssets(supportModel.value, supportAnimations.value);
-    if (token !== vehicleLoadToken) return;
+    if (token !== vehicleLoadToken) return false;
     soldier.value = assets;
+    return true;
+  } catch (error) {
+    if (token === vehicleLoadToken) {
+      soldier.value = undefined;
+      status.value = `人物预览未载入：${message(error)}。` + '如果这是旧版本保存的自定义人物资源，请重新选择该文件以授予读取权限。';
+      resourceDialog.value = true;
+    }
+    return false;
   }
-  catch (e) { if (token === vehicleLoadToken) { soldier.value = undefined; status.value = `人物预览未载入：${message(e)}`; } }
 }
 let weaponLoadToken = 0;
 async function loadSelectedWeaponEditor() {

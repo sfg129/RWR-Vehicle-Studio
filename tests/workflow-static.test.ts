@@ -56,4 +56,21 @@ describe('nightly publish workflow', () => {
     expect(publish).not.toContain('tauri-apps/tauri-action@dev');
     expect(publish).not.toContain('tagName: nightly');
   });
+
+  it('release artifact 不递归上传 macOS app bundle 内容', () => {
+    const publish = workflow('publish.yml');
+    expect(publish).toContain('ditto -c -k');
+    expect(publish).toContain('.app.zip');
+    expect(publish).toContain('bundle/dmg/*.dmg');
+    expect(publish).toContain('bundle/appimage/*.AppImage');
+    expect(publish).toContain('bundle/deb/*.deb');
+    expect(publish).toContain('bundle/nsis/*.exe');
+    expect(publish).not.toContain('path: src-tauri/target/**/release/bundle/**');
+  });
+
+  it('stale CI 结果不能覆盖当前 main nightly', () => {
+    const publish = workflow('publish.yml');
+    expect(publish).toContain('git rev-parse origin/main');
+    expect(publish).toContain('should_publish');
+  });
 });
