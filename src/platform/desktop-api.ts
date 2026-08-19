@@ -32,6 +32,7 @@ export const desktop = {
   },
   saveVehicle: (path: string, text: string, saveAs = false) =>
     invoke<SavedFile | null>('save_vehicle', { path, text, saveAs }),
+  registerVehicleSession: (path: string) => invoke<void>('register_vehicle_session', { path }),
   registerWeaponSession: (path: string) => invoke<void>('register_weapon_session', { path }),
   saveWeapon: (path: string, text: string) => invoke<SavedFile>('save_weapon', { path, text }),
 };

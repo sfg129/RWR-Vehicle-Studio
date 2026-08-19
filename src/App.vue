@@ -84,6 +84,7 @@ async function applyRecoverySnapshot(recovery: RecoverySnapshot): Promise<void> 
     savedText.value = recovery.vehicle.savedText;
     undoStack.value = []; missing.value = []; collapsedGroups.clear();
     markDocumentChanged();
+    try { await desktop.registerVehicleSession(recovery.vehicle.path); } catch (error) { status.value = `载具恢复注册失败：${message(error)}`; }
     await resolveAutomaticBase();
     rebuildPreview(false);
     if (hasRememberedResources.value) {
@@ -587,7 +588,8 @@ onMounted(async () => {
   try {
     const appWindow = getCurrentWindow();
     unlistenClose = await appWindow.onCloseRequested(async (event) => {
-      // Windows 默认 window-close 链不可靠：clean/confirmed 直接 exit(0)，仅在用户取消关闭时 preventDefault。
+      // 一进入 closeRequested 就同步 preventDefault，默认 close 链不再继续；最终退出只由 exit(0) 完成。
+      event.preventDefault();
       if (exiting) return;
       if (anyDirty.value) {
         const confirmed = await tauriConfirm('有未保存修改，仍要退出吗？', {
@@ -596,7 +598,7 @@ onMounted(async () => {
           okLabel: '退出',
           cancelLabel: '取消',
         });
-        if (!confirmed) { event.preventDefault(); return; }
+        if (!confirmed) return;
         captureRecoverySnapshot();
       }
       exiting = true;
