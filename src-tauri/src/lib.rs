@@ -2,6 +2,7 @@ use serde::Serialize;
 use std::{collections::{BTreeMap, BTreeSet, HashMap, HashSet}, fs, path::{Path, PathBuf}, sync::Mutex};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
+use tauri_plugin_fs::FsExt;
 use walkdir::WalkDir;
 
 #[derive(Default)]
@@ -61,20 +62,37 @@ async fn open_vehicle(app: AppHandle, state: State<'_, AppState>) -> Result<Opti
     }).await?;
     let Some(picked) = picked else { return Ok(None) };
     let path = local_path(picked)?;
+    let path = allow_read_file(&app, &path)?;
     Ok(Some(read_opened_vehicle(path, &state)?))
 }
 
-#[tauri::command]
-fn resolve_vehicle_base(path: String, reference: String) -> Result<Option<OpenedFile>, String> {
-    let current = PathBuf::from(path);
-    let Some(parent) = current.parent() else { return Ok(None) };
-    // RWR base references are logical paths; normalize both / and \\ so
-    // Windows-authored references also resolve on Linux/macOS (R3-026).
-    let mut candidate = parent.to_path_buf();
-    for component in reference.trim().split(|c| c == '/' || c == '\\').filter(|part| !part.is_empty()) {
-        candidate.push(component);
+fn resolve_vehicle_base_candidate(current: &Path, reference: &str) -> Result<Option<PathBuf>, String> {
+    let parent = current.parent().ok_or_else(|| "当前载具没有父目录".to_string())?.canonicalize().map_err(|e| format!("无法确认载具目录：{e}"))?;
+    let parts = reference.trim().split(|c| c == '/' || c == '\\').filter(|part| !part.is_empty()).collect::<Vec<_>>();
+    if parts.iter().any(|part| *part == "..") { return Err("基础载具引用不能包含 ..".into()); }
+    let mut candidate = parent.clone();
+    for part in parts {
+        if part != "." { candidate.push(part); }
     }
-    if !candidate.is_file() { return Ok(None) }
+    let candidate = match candidate.canonicalize() { Ok(value) => value, Err(_) => return Ok(None) };
+    if !candidate.starts_with(&parent) { return Err("基础载具引用超出当前载具目录".into()); }
+    if !candidate.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("vehicle") || ext.eq_ignore_ascii_case("xml")) {
+        return Err("基础载具不是 .vehicle / .xml 文件".into());
+    }
+    Ok(Some(candidate))
+}
+
+#[tauri::command]
+fn resolve_vehicle_base(app: AppHandle, state: State<'_, AppState>, path: String, reference: String) -> Result<Option<OpenedFile>, String> {
+    let current = PathBuf::from(path).canonicalize().map_err(|e| format!("无法确认当前载具路径：{e}"))?;
+    let writable = state.writable.lock().map_err(|_| "载具权限状态不可用")?;
+    if !writable.contains(&current) {
+        return Err("拒绝解析基础载具：当前载具不属于本次编辑会话".into());
+    }
+    drop(writable);
+
+    let Some(candidate) = resolve_vehicle_base_candidate(&current, &reference)? else { return Ok(None) };
+    app.fs_scope().allow_file(&candidate).map_err(|e| format!("无法授权基础载具读取：{e}"))?;
     Ok(Some(read_vehicle_file(candidate)?))
 }
 
@@ -88,12 +106,13 @@ async fn choose_vehicle_base(app: AppHandle) -> Result<Option<OpenedFile>, Strin
     if !path.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("vehicle")) {
         return Err("所选基础文件不是 .vehicle 文件".into());
     }
+    let path = allow_read_file(&app, &path)?;
     Ok(Some(read_vehicle_file(path)?))
 }
 
 #[tauri::command]
-fn open_vehicle_path(path: String, state: State<'_, AppState>) -> Result<OpenedFile, String> {
-    let path = PathBuf::from(path);
+fn open_vehicle_path(app: AppHandle, state: State<'_, AppState>, path: String) -> Result<OpenedFile, String> {
+    let path = require_read_scope(&app, Path::new(&path))?;
     if !path.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("vehicle") || ext.eq_ignore_ascii_case("xml")) {
         return Err("所选项目不是 .vehicle / .xml 载具文件".into());
     }
@@ -114,6 +133,27 @@ fn read_vehicle_file(path: PathBuf) -> Result<OpenedFile, String> {
     Ok(OpenedFile { name: file_name(&path), path: display(&path), text })
 }
 
+fn allow_read_file(app: &AppHandle, path: &Path) -> Result<PathBuf, String> {
+    let canonical = path.canonicalize().map_err(|e| format!("无法确认文件路径：{e}"))?;
+    app.fs_scope().allow_file(&canonical).map_err(|e| format!("无法授权文件读取：{e}"))?;
+    Ok(canonical)
+}
+
+fn allow_read_directory(app: &AppHandle, path: &Path) -> Result<PathBuf, String> {
+    let canonical = path.canonicalize().map_err(|e| format!("无法确认文件夹路径：{e}"))?;
+    if !canonical.is_dir() { return Err("所选路径不是文件夹".into()); }
+    app.fs_scope().allow_directory(&canonical, true).map_err(|e| format!("无法授权文件夹读取：{e}"))?;
+    Ok(canonical)
+}
+
+fn require_read_scope(app: &AppHandle, path: &Path) -> Result<PathBuf, String> {
+    let canonical = path.canonicalize().map_err(|e| format!("无法确认读取路径：{e}"))?;
+    if !app.fs_scope().is_allowed(&canonical) {
+        return Err(format!("拒绝读取：路径不在当前 Tauri 文件系统授权范围内：{}", display(&canonical)));
+    }
+    Ok(canonical)
+}
+
 #[tauri::command]
 async fn choose_vehicle_workspace(app: AppHandle) -> Result<Option<VehicleWorkspace>, String> {
     let (tx, mut rx) = tauri::async_runtime::channel(1);
@@ -121,16 +161,14 @@ async fn choose_vehicle_workspace(app: AppHandle) -> Result<Option<VehicleWorksp
     let picked = rx.recv().await.ok_or_else(|| "文件夹选择窗口意外关闭".to_string())?;
     let Some(picked) = picked else { return Ok(None) };
     let path = local_path(picked)?;
+    let path = allow_read_directory(&app, &path)?;
     Ok(Some(build_vehicle_workspace(path)?))
 }
 
-fn scan_vehicle_workspace_impl(path: String) -> Result<VehicleWorkspace, String> {
-    build_vehicle_workspace(PathBuf::from(path))
-}
-
 #[tauri::command]
-fn scan_vehicle_workspace(path: String) -> Result<VehicleWorkspace, String> {
-    scan_vehicle_workspace_impl(path)
+fn scan_vehicle_workspace(app: AppHandle, path: String) -> Result<VehicleWorkspace, String> {
+    let path = require_read_scope(&app, Path::new(&path))?;
+    build_vehicle_workspace(path)
 }
 
 fn schema_fingerprint(root: &Path) -> Result<u64, String> {
@@ -166,9 +204,9 @@ fn scan_vehicle_schema_impl(path: String, state: &AppState, force: bool) -> Resu
 }
 
 #[tauri::command]
-fn scan_vehicle_schema(path: String, force: bool, state: State<'_, AppState>) -> Result<VehicleSchema, String> {
-    let state_ref = state.inner();
-    scan_vehicle_schema_impl(path, state_ref, force)
+fn scan_vehicle_schema(app: AppHandle, path: String, force: bool, state: State<'_, AppState>) -> Result<VehicleSchema, String> {
+    let root = require_read_scope(&app, Path::new(&path))?;
+    scan_vehicle_schema_impl(display(&root), state.inner(), force)
 }
 
 fn scan_vehicle_schema_root(root: PathBuf) -> Result<VehicleSchema, String> {
@@ -257,8 +295,9 @@ fn list_workspace_dir_impl(path: String) -> Result<Vec<VehicleWorkspaceEntry>, S
 }
 
 #[tauri::command]
-fn list_workspace_dir(path: String) -> Result<Vec<VehicleWorkspaceEntry>, String> {
-    list_workspace_dir_impl(path)
+fn list_workspace_dir(app: AppHandle, path: String) -> Result<Vec<VehicleWorkspaceEntry>, String> {
+    let dir = require_read_scope(&app, Path::new(&path))?;
+    list_workspace_dir_impl(display(&dir))
 }
 
 #[tauri::command]
@@ -266,7 +305,10 @@ async fn choose_folder(app: AppHandle) -> Result<Option<String>, String> {
     let (tx, mut rx) = tauri::async_runtime::channel(1);
     app.dialog().file().pick_folder(move |picked| { let _ = tx.try_send(picked); });
     let picked = rx.recv().await.ok_or_else(|| "文件夹选择窗口意外关闭".to_string())?;
-    Ok(picked.map(local_path).transpose()?.map(|p| display(&p)))
+    let Some(picked) = picked else { return Ok(None) };
+    let path = local_path(picked)?;
+    let path = allow_read_directory(&app, &path)?;
+    Ok(Some(display(&path)))
 }
 
 #[tauri::command]
@@ -274,6 +316,7 @@ async fn choose_override_file(app: AppHandle) -> Result<Option<String>, String> 
     let picked = receive_file(|done| { app.dialog().file().pick_file(done); }).await?;
     let Some(picked) = picked else { return Ok(None) };
     let path = local_path(picked)?;
+    let path = allow_read_file(&app, &path)?;
     Ok(Some(display(&path)))
 }
 
@@ -283,6 +326,7 @@ async fn choose_support_file(app: AppHandle, kind: String) -> Result<Option<Stri
     let picked = receive_file(|done| { app.dialog().file().add_filter(label, &["xml"]).pick_file(done); }).await?;
     let Some(picked) = picked else { return Ok(None) };
     let path = local_path(picked)?;
+    let path = allow_read_file(&app, &path)?;
     Ok(Some(display(&path)))
 }
 
@@ -320,8 +364,9 @@ fn scan_resource_folder_impl(path: String, kind: String) -> Result<ResourceFolde
 }
 
 #[tauri::command]
-fn scan_resource_folder(path: String, kind: String) -> Result<ResourceFolderScan, String> {
-    scan_resource_folder_impl(path, kind)
+fn scan_resource_folder(app: AppHandle, path: String, kind: String) -> Result<ResourceFolderScan, String> {
+    let root = require_read_scope(&app, Path::new(&path))?;
+    scan_resource_folder_impl(display(&root), kind)
 }
 
 #[tauri::command]
@@ -353,6 +398,7 @@ async fn save_vehicle(app: AppHandle, state: State<'_, AppState>, path: String, 
     let backup = write_backup(&target)?;
     atomic_write(&target, text.as_bytes())?;
     let canonical = target.canonicalize().map_err(|e| format!("无法确认已保存文件：{e}"))?;
+    app.fs_scope().allow_file(&canonical).map_err(|e| format!("保存成功，但无法授权新文件读取：{e}"))?;
     state.writable.lock().map_err(|_| "文件权限状态不可用")?.insert(canonical.clone());
     Ok(Some(SavedFile { name: file_name(&canonical), path: display(&canonical), backup_path: backup.map(|p| display(&p)) }))
 }
@@ -463,8 +509,9 @@ mod tests {
         fs::write(dir.join("subdir").join("base.vehicle"), "<vehicle/>").unwrap();
         let leaf = dir.join("leaf.vehicle");
         fs::write(&leaf, r#"<vehicle file="subdir\base.vehicle"/>"#).unwrap();
-        let resolved = resolve_vehicle_base(display(&leaf), r"subdir\base.vehicle".to_string()).expect("base should resolve").expect("base file should exist");
-        assert!(resolved.path.ends_with("base.vehicle"));
+        let leaf_canonical = leaf.canonicalize().unwrap();
+        let resolved = resolve_vehicle_base_candidate(&leaf_canonical, r"subdir\base.vehicle").expect("base should resolve").expect("base file should exist");
+        assert!(resolved.ends_with("base.vehicle"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -524,7 +571,7 @@ mod tests {
         // A flat directory with many non-.vehicle files must not fail the (now lazy) workspace listing.
         for i in 0..10_001 { fs::write(dir.join(format!("asset{i}.mesh")), "").unwrap(); }
         fs::write(dir.join("tank.vehicle"), "<vehicle/>").unwrap();
-        let workspace = scan_vehicle_workspace_impl(display(&dir)).expect("非 .vehicle 文件不应让工作区列举失败");
+        let workspace = build_vehicle_workspace(PathBuf::from(display(&dir))).expect("非 .vehicle 文件不应让工作区列举失败");
         assert_eq!(workspace.entries.len(), 10_002);
         assert!(workspace.entries.iter().any(|e| e.name == "tank.vehicle" && e.is_vehicle));
         assert!(workspace.entries.iter().all(|e| e.children.is_empty()));
