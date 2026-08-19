@@ -10,6 +10,8 @@ export interface SourceAttribute {
 
 export interface SourceNode {
   id: number;
+  /** Stable identity for revert across structural edits (survives commit reparse). */
+  originId: number;
   name: string;
   attributes: SourceAttribute[];
   children: SourceNode[];
@@ -24,8 +26,12 @@ export interface SourceNode {
 export class SourceDocument {
   readonly roots: SourceNode[] = [];
   readonly nodes: SourceNode[] = [];
+  /** Structural diagnostics (mismatched / unclosed tags) detected while parsing; empty when well-formed. */
+  readonly structuralErrors: string[] = [];
   private changes = new Map<string, string>();
-  constructor(public source: string) { this.parse(); }
+  private saved: string;
+  private serializedCache: string | undefined;
+  constructor(public source: string) { this.saved = source; this.parse(); }
 
   get root(): SourceNode | undefined { return this.roots[0]; }
   get dirty(): boolean { return this.changes.size > 0; }
@@ -42,10 +48,32 @@ export class SourceDocument {
     if (original === undefined) throw new Error(`属性 ${attr} 不存在；当前版本只修改已有属性`);
     const key = this.key(node, attr);
     if (value === original) this.changes.delete(key); else this.changes.set(key, value);
+    this.serializedCache = undefined;
   }
   reset(node?: SourceNode): void {
     if (!node) this.changes.clear();
     else for (const attr of node.attributes) this.changes.delete(this.key(node, attr.name));
+    this.serializedCache = undefined;
+  }
+  /** Mark the current working text as the saved snapshot (call after a successful save). */
+  markSaved(): void { this.saved = this.source; }
+  /** Override the saved snapshot (e.g. after rebuilding the document from an undo snapshot). */
+  restoreSaved(snapshot: string): void { this.saved = snapshot; }
+  /** Restore this node's subtree to the saved snapshot, preserving pending edits on other nodes. */
+  revertNode(node: SourceNode): void {
+    const originId = node.originId;
+    const savedDoc = new SourceDocument(this.saved);
+    const savedNode = savedDoc.nodes[originId] ?? savedDoc.nodes.find((n) => n.originId === originId);
+    if (!savedNode) return;
+    const savedRaw = savedDoc.raw(savedNode);
+    // Materialize pending edits first so they become part of the source text and are
+    // preserved by the subsequent structural replace without path-based reapplication.
+    this.materialize();
+    const current = this.nodes[originId] ?? this.nodes.find((n) => n.originId === originId);
+    if (!current) return;
+    this.commit(this.source.slice(0, current.start) + savedRaw + this.source.slice(current.endTagEnd));
+    const restored = this.nodes.find((n) => n.start === current.start) ?? this.nodes[originId];
+    if (restored) restored.originId = originId;
   }
   addAttribute(node: SourceNode, name: string, value = '0'): void {
     const id = node.id; this.materialize(); const current = this.nodes[id];
@@ -92,9 +120,19 @@ export class SourceDocument {
     else if (this.source[end] === '\n') end += 1;
     this.commit(this.source.slice(0, start) + this.source.slice(end));
   }
-  commit(serialized: string): void { this.source = serialized; this.changes.clear(); this.roots.length = 0; this.nodes.length = 0; this.parse(); }
+  commit(serialized: string): void {
+    const oldNodes = this.nodes.map((node) => ({ raw: this.currentRaw(node), originId: node.originId }));
+    this.source = serialized; this.changes.clear(); this.roots.length = 0; this.nodes.length = 0; this.serializedCache = undefined; this.parse();
+    const byRaw = new Map<string, number[]>();
+    for (const old of oldNodes) { const queue = byRaw.get(old.raw); if (queue) queue.push(old.originId); else byRaw.set(old.raw, [old.originId]); }
+    for (const node of this.nodes) {
+      const queue = byRaw.get(this.currentRaw(node));
+      if (queue && queue.length) node.originId = queue.shift()!;
+    }
+  }
 
   serialize(): string {
+    if (this.serializedCache !== undefined) return this.serializedCache;
     const replacements: { start: number; end: number; value: string }[] = [];
     for (const node of this.nodes) for (const attr of node.attributes) {
       const changed = this.changes.get(this.key(node, attr.name));
@@ -103,16 +141,36 @@ export class SourceDocument {
     replacements.sort((a, b) => b.start - a.start);
     let result = this.source;
     for (const r of replacements) result = result.slice(0, r.start) + r.value + result.slice(r.end);
+    this.serializedCache = result;
     return result;
   }
 
   descendants(name: string): SourceNode[] { return this.nodes.filter((n) => n.name === name); }
   raw(node: SourceNode): string { return this.source.slice(node.start, node.endTagEnd); }
+  /** Node text including pending attribute changes, without mutating the working document history. */
+  currentRaw(node: SourceNode): string {
+    const replacements: { start: number; end: number; value: string }[] = [];
+    const visit = (n: SourceNode): void => {
+      for (const attr of n.attributes) {
+        const changed = this.changes.get(this.key(n, attr.name));
+        if (changed !== undefined) replacements.push({ start: attr.valueStart, end: attr.valueEnd, value: escapeXml(changed, attr.quote) });
+      }
+      for (const child of n.children) visit(child);
+    };
+    visit(node);
+    if (replacements.length === 0) return this.raw(node);
+    replacements.sort((a, b) => b.start - a.start);
+    let result = this.raw(node);
+    const offset = node.start;
+    for (const r of replacements) result = result.slice(0, r.start - offset) + r.value + result.slice(r.end - offset);
+    return result;
+  }
 
   private materialize(): void { if (this.dirty) this.commit(this.serialize()); }
 
   private parse(): void {
     const stack: SourceNode[] = [];
+    this.structuralErrors.length = 0;
     let i = 0;
     while (i < this.source.length) {
       const start = this.source.indexOf('<', i);
@@ -123,11 +181,18 @@ export class SourceDocument {
       const end = scanTagEnd(this.source, start);
       if (end < start) throw new Error('XML 起始标签未闭合');
       const inner = this.source.slice(start + 1, end);
-      if (inner.startsWith('/')) { const closed = stack.pop(); if (closed) { closed.endTagStart = start; closed.endTagEnd = end + 1; } i = end + 1; continue; }
+      if (inner.startsWith('/')) {
+        const closingName = inner.slice(1).trim().split(/\s+/)[0] ?? '';
+        const open = stack.at(-1);
+        if (!open) this.structuralErrors.push(`意外的闭合标签 </${closingName}>`);
+        else if (open.name !== closingName) this.structuralErrors.push(`标签不匹配：<${open.name}> 被 </${closingName}> 闭合`);
+        const closed = stack.pop(); if (closed) { closed.endTagStart = start; closed.endTagEnd = end + 1; }
+        i = end + 1; continue;
+      }
       const nameMatch = inner.match(/^\s*([\w:.-]+)/);
       if (!nameMatch) { i = end + 1; continue; }
       const name = nameMatch[1];
-      const node: SourceNode = { id: this.nodes.length, name, attributes: [], children: [], parent: stack.at(-1) ?? null,
+      const node: SourceNode = { id: this.nodes.length, originId: this.nodes.length, name, attributes: [], children: [], parent: stack.at(-1) ?? null,
         start, startTagEnd: end + 1, endTagStart: end + 1, endTagEnd: end + 1, selfClosing: /\/\s*$/.test(inner) };
       const attrOffset = start + 1;
       const attrPattern = /([A-Za-z_:][\w:.-]*)\s*=\s*(["'])(.*?)\2/gs;
@@ -146,7 +211,8 @@ export class SourceDocument {
       if (!node.selfClosing) stack.push(node);
       i = end + 1;
     }
-    for (const unclosed of stack) unclosed.endTagEnd = this.source.length;
+    for (const unclosed of stack) { unclosed.endTagEnd = this.source.length; this.structuralErrors.push(`标签未闭合：<${unclosed.name}>`); }
+    if (this.roots.length !== 1) this.structuralErrors.push(`XML 根元素数量应为 1，实际为 ${this.roots.length}`);
   }
 }
 
@@ -171,4 +237,15 @@ function unescapeXml(value: string): string {
 function lineIndent(text: string, at: number): string {
   const start = text.lastIndexOf('\n', at - 1) + 1;
   return text.slice(start, at).match(/^[ \t]*/)?.[0] ?? '';
+}
+function pathOf(node: SourceNode): number[] {
+  const path: number[] = [];
+  let current: SourceNode | null = node;
+  while (current?.parent) { path.unshift(current.parent.children.indexOf(current)); current = current.parent; }
+  return path;
+}
+function nodeAtPath(root: SourceNode | undefined, path: number[]): SourceNode | undefined {
+  let current = root;
+  for (const index of path) { current = current?.children[index]; if (!current) return undefined; }
+  return current;
 }

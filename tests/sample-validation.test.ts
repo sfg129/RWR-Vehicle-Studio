@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SourceDocument } from '../src/core/xml/source-document';
-import { characterSlotHidden, characterSlotPose, sceneEntries, tireVisualPosition, turretWorldPose } from '../src/core/vehicle/vehicle-model';
+import { characterSlotHidden, characterSlotPose, dragNeedsRebuild, editableBasisRotation, rotateY, sceneEntries, tireVisualPosition, turretWorldPose } from '../src/core/vehicle/vehicle-model';
 import { composeVehicle, vehicleBaseReference } from '../src/core/vehicle/vehicle-composition';
 import { parseOgreMesh } from '../src/core/ogre/mesh-reader';
 import { SoldierAssets, SOLDIER_GAME_SCALE, rwrLinearToDisplay } from '../src/core/soldier/soldier-assets';
@@ -144,6 +144,30 @@ describe('基础载具引用', () => {
   });
 });
 
+describe('基础载具组合（pending 属性）', () => {
+  it('组合 preview 包含 leaf 顶层节点的 pending 属性修改（RV-002）', () => {
+    const base = new SourceDocument('<vehicle><physics mass="1"/></vehicle>');
+    const leaf = new SourceDocument('<vehicle><physics mass="2"/></vehicle>');
+    leaf.set(leaf.descendants('physics')[0], 'mass', '3');
+    const composed = composeVehicle(base, leaf);
+    const previewPhysics = composed.document.descendants('physics')[0];
+    expect(composed.document.value(previewPhysics, 'mass')).toBe('3');
+    expect(composed.editableNode(previewPhysics)).toBe(leaf.descendants('physics')[0]);
+  });
+  it('组合 preview 包含 leaf 嵌套子节点的 pending 修改，且不污染 base/历史（RV-002）', () => {
+    const base = new SourceDocument('<vehicle><turret><visual offset="1 0 0"/></turret></vehicle>');
+    const leaf = new SourceDocument('<vehicle><turret><visual offset="1 0 0"/></turret></vehicle>');
+    const visual = leaf.descendants('visual')[0];
+    leaf.set(visual, 'offset', '9 9 9');
+    const composed = composeVehicle(base, leaf);
+    const previewVisual = composed.document.descendants('visual')[0];
+    expect(composed.document.value(previewVisual, 'offset')).toBe('9 9 9');
+    expect(composed.editableNode(previewVisual)).toBe(visual);
+    expect(leaf.raw(visual)).toBe('<visual offset="1 0 0"/>');
+    expect(leaf.serialize()).toBe('<vehicle><turret><visual offset="9 9 9"/></turret></vehicle>');
+  });
+});
+
 describe('乘员显示规则', () => {
   it('character_slot 的 hiding="1" 表示完全隐藏', () => {
     const doc = new SourceDocument('<vehicle><character_slot type="passenger" hiding="1"/><character_slot type="driver" hiding="0"/></vehicle>');
@@ -165,5 +189,72 @@ describe('乘员显示规则', () => {
     expect(attached.position[2]).toBeCloseTo(-1 - Math.sin(Math.PI / 2 + 0.5));
     expect(attached.rotation).toBeCloseTo(Math.PI / 2 + 0.75);
     expect(characterSlotPose(doc, slots[1], turrets).position).toEqual([2, 4, 6]);
+  });
+});
+
+describe('局部坐标编辑基准（RV-003）', () => {
+  it('无父炮塔的 offset 基准为 0，子炮塔基准为父炮塔累计旋转', () => {
+    const doc = new SourceDocument('<vehicle><turret offset="10 0 0" rotation="1.5707963267948966"/><turret offset="1 0 0" parent_turret_index="0"/></vehicle>');
+    const turrets = doc.root!.children.filter((n) => n.name === 'turret');
+    expect(editableBasisRotation(doc, turrets[0])).toBe(0);
+    expect(editableBasisRotation(doc, turrets[1])).toBeCloseTo(Math.PI / 2);
+  });
+  it('turret visual 的 offset 基准是 turret_index 炮塔的累计旋转', () => {
+    const doc = new SourceDocument('<vehicle><turret rotation="1.5707963267948966"/><visual class="turret" turret_index="0" offset="1 0 0"/></vehicle>');
+    expect(editableBasisRotation(doc, doc.descendants('visual')[0])).toBeCloseTo(Math.PI / 2);
+  });
+  it('普通外观、未 attach 乘员基准为 0；attached 乘员基准为所附炮塔累计旋转', () => {
+    const doc = new SourceDocument('<vehicle><turret rotation="0.5"/><visual class="chassis" offset="1 0 0"/><character_slot seat_position="0 0 0"/><character_slot attached_on_turret="0" seat_position="1 0 0"/></vehicle>');
+    const chassis = doc.descendants('visual').find((v) => doc.value(v, 'class') === 'chassis')!;
+    const [plain, attached] = doc.descendants('character_slot');
+    expect(editableBasisRotation(doc, chassis)).toBe(0);
+    expect(editableBasisRotation(doc, plain)).toBe(0);
+    expect(editableBasisRotation(doc, attached)).toBeCloseTo(0.5);
+  });
+  it('父炮塔 90° 时子炮塔世界 +X 拖拽写回 local +Z', () => {
+    const doc = new SourceDocument('<vehicle><turret offset="0 0 0" rotation="1.5707963267948966"/><turret offset="0 0 0" parent_turret_index="0"/></vehicle>');
+    const turrets = doc.root!.children.filter((n) => n.name === 'turret');
+    const basis = editableBasisRotation(doc, turrets[1]);
+    expect(basis).toBeCloseTo(Math.PI / 2);
+    const local = rotateY([1, 0, 0], -basis);
+    expect(local[0]).toBeCloseTo(0);
+    expect(local[1]).toBeCloseTo(0);
+    expect(local[2]).toBeCloseTo(1);
+  });
+});
+
+describe('增量拖拽重建判定（R3-002）', () => {
+  it('turret offset 必须全量重建，普通 visual 与独立乘员可继续增量更新', () => {
+    const doc = new SourceDocument('<vehicle><turret offset="0 0 0"/><visual offset="0 0 0"/><character_slot seat_position="0 0 0"/></vehicle>');
+    const turret = doc.root!.children.find((n) => n.name === 'turret')!;
+    const visual = doc.root!.children.find((n) => n.name === 'visual')!;
+    const slot = doc.root!.children.find((n) => n.name === 'character_slot')!;
+    expect(dragNeedsRebuild(turret)).toBe(true);
+    expect(dragNeedsRebuild(visual)).toBe(false);
+    expect(dragNeedsRebuild(slot)).toBe(false);
+  });
+
+  it('移动父炮塔后，子炮塔 / turret visual / attached 乘员的世界坐标必须同步变化', () => {
+    const original = new SourceDocument('<vehicle><turret offset="0 0 0"/><turret parent_turret_index="0" offset="1 0 0"/><visual class="turret" turret_index="0" offset="0 0 0"/><character_slot attached_on_turret="0" seat_position="0 1 0"/></vehicle>');
+    const moved = new SourceDocument('<vehicle><turret offset="2 0 0"/><turret parent_turret_index="0" offset="1 0 0"/><visual class="turret" turret_index="0" offset="0 0 0"/><character_slot attached_on_turret="0" seat_position="0 1 0"/></vehicle>');
+    const originalTurrets = original.root!.children.filter((n) => n.name === 'turret');
+    const movedTurrets = moved.root!.children.filter((n) => n.name === 'turret');
+    const originalVisual = original.descendants('visual')[0];
+    const movedVisual = moved.descendants('visual')[0];
+    const originalSlot = original.descendants('character_slot')[0];
+    const movedSlot = moved.descendants('character_slot')[0];
+
+    const childPose = turretWorldPose(original, originalTurrets, 1)!;
+    const movedChildPose = turretWorldPose(moved, movedTurrets, 1)!;
+    expect(movedChildPose.position[0]).toBeCloseTo(childPose.position[0] + 2);
+
+    const visualBasis = editableBasisRotation(original, originalVisual);
+    const movedVisualBasis = editableBasisRotation(moved, movedVisual);
+    expect(movedVisualBasis).toBeCloseTo(visualBasis);
+
+    const slotPose = characterSlotPose(original, originalSlot, originalTurrets);
+    const movedSlotPose = characterSlotPose(moved, movedSlot, movedTurrets);
+    expect(movedSlotPose.position[0]).toBeCloseTo(slotPose.position[0] + 2);
+    expect(movedSlotPose.position[1]).toBeCloseTo(slotPose.position[1]);
   });
 });

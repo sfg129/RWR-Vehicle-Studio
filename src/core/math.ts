@@ -5,3 +5,17 @@ export function vec3(value?: string): Vec3 {
 }
 export function vec3Text(v: Vec3): string { return v.map((n) => Number(n.toFixed(5)).toString()).join(' '); }
 export function finite(v?: number): number { return Number.isFinite(v) ? v! : 0; }
+export function isValidNumber(value: string): boolean {
+  const text = value.trim();
+  return text !== '' && Number.isFinite(Number(text));
+}
+export function isValidVec3(value: string): boolean {
+  const parts = value.trim().split(/\s+/).filter(Boolean);
+  return parts.length === 3 && parts.every((part) => Number.isFinite(Number(part)));
+}
+export function isValidNonNegativeInteger(value: string): boolean {
+  const text = value.trim();
+  if (text === '') return false;
+  const number = Number(text);
+  return Number.isInteger(number) && number >= 0;
+}

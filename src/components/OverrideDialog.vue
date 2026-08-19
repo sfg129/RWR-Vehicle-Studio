@@ -8,7 +8,7 @@ async function add() { const path = await desktop.chooseOverrideFile(); if (path
   <div class="modal-backdrop"><section class="dialog override-dialog">
     <header><div><small>EXPLICIT OVERRIDES</small><h2>单文件资源覆盖</h2></div><button class="icon" @click="$emit('close')">×</button></header>
     <p class="muted">同名覆盖优先于文件夹自动索引，适合重名资源或位于目录外的特殊文件。</p>
-    <div class="override-list"><div v-if="!Object.keys(catalog.overrides).length" class="empty">尚未指定覆盖文件</div><div v-for="(path, name) in catalog.overrides" :key="name"><strong>{{ name }}</strong><span>{{ path }}</span></div></div>
+    <div class="override-list"><div v-if="!Object.keys(catalog.overrides).length" class="empty">尚未指定覆盖文件</div><div v-for="(path, name) in catalog.overrides" :key="name"><strong>{{ name }}</strong><span class="ellipsis">{{ path }}</span></div></div>
     <footer><button @click="$emit('close')">完成</button><button class="primary" @click="add">添加文件</button></footer>
   </section></div>
 </template>

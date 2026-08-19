@@ -5,7 +5,7 @@ import { desktop } from '../platform/desktop-api';
 import { parseOgreMesh, type OgreMesh } from '../core/ogre/mesh-reader';
 import type { SourceDocument, SourceNode } from '../core/xml/source-document';
 import type { ResourceCatalog } from '../core/resources/resource-catalog';
-import { characterSlotHidden, characterSlotPose, idleState, rotateY, tireVisualPosition, turretWorldPose, visualMatchesDamageState, WEAPON_LOGICAL_TO_MODEL_YAW } from '../core/vehicle/vehicle-model';
+import { characterSlotHidden, characterSlotPose, dragNeedsRebuild, editableBasisRotation, idleState, localDragValue, rotateY, tireVisualPosition, turretWorldPose, visualMatchesDamageState, WEAPON_LOGICAL_TO_MODEL_YAW } from '../core/vehicle/vehicle-model';
 import { vec3, type Vec3 } from '../core/math';
 import { SoldierAssets, SOLDIER_GAME_SCALE, rwrLinearToDisplay, type SoldierAnimation } from '../core/soldier/soldier-assets';
 import { parseStaticVoxelModel, type StaticVoxel } from '../core/voxel/voxel-model';
@@ -14,18 +14,32 @@ export interface ViewOptions { showBroken: boolean; showOccupants: boolean; show
 interface Occupant { mesh: THREE.InstancedMesh; animation?: SoldierAnimation; assets: SoldierAssets; pose: Float32Array; dynamic: boolean }
 interface DragInfo { node: SourceNode; attr: string; value: Vec3; start: THREE.Vector3; basisRotation: number }
 
+const ASSET_CONCURRENCY = 6;
+/** Run an async task over items with a bounded number of in-flight workers (RV-027). */
+async function mapLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+    while (next < items.length) { const item = items[next++]; await fn(item); }
+  });
+  await Promise.all(workers);
+}
+
 export class SceneController {
   private scene = new THREE.Scene(); private camera = new THREE.PerspectiveCamera(45, 1, 0.05, 1000);
   private renderer: THREE.WebGLRenderer; private controls: OrbitControls; private transform: TransformControls;
   private root = new THREE.Group(); private selectedHelper?: THREE.BoxHelper; private proxy = new THREE.Object3D(); private drag?: DragInfo;
   private doc?: SourceDocument; private catalog?: ResourceCatalog; private soldier?: SoldierAssets; private options?: ViewOptions;
   private meshCache = new Map<string, Promise<OgreMesh>>(); private textureCache = new Map<string, Promise<THREE.Texture>>(); private voxelCache = new Map<string, Promise<StaticVoxel[]>>();
+  private geometryCache = new Map<string, THREE.BufferGeometry>(); private sharedAssets = new Set<THREE.BufferGeometry | THREE.Material>();
   private nodeObjects = new Map<number, THREE.Object3D>(); private occupants: Occupant[] = []; private startTime = performance.now();
+  private sceneGeneration = 0;
   private pickTargets: THREE.Object3D[] = []; private raycaster = new THREE.Raycaster(); private pointer = new THREE.Vector2(); private frame = 0;
   private lastAnimationUpdate = -Infinity; private readonly animationIntervalMs = 50;
+  private pointerDownPos = new THREE.Vector2(); private readonly pickThreshold = 5;
+  private resizeObserver?: ResizeObserver; private disposed = false;
   private fpsFrames = 0; private fpsStarted = performance.now();
 
-  constructor(private host: HTMLElement, private onSelect: (id: number) => void, private onMove: (node: SourceNode, attr: string, value: Vec3) => void,
+  constructor(private host: HTMLElement, private onSelect: (id: number) => void, private onMove: (node: SourceNode, attr: string, value: Vec3, needsRebuild: boolean) => void,
     private onStats: (fps: number, dynamicOccupants: number) => void) {
     this.scene.background = new THREE.Color(0x0d1115); this.scene.fog = new THREE.Fog(0x0d1115, 80, 250);
     this.camera.position.set(16, 11, 18);
@@ -39,25 +53,53 @@ export class SceneController {
     this.transform.addEventListener('dragging-changed', (e: any) => { this.controls.enabled = !e.value; });
     this.transform.addEventListener('mouseDown', () => { if (this.drag) this.drag.start.copy(this.proxy.position); });
     this.transform.addEventListener('mouseUp', () => {
-      if (!this.drag) return; const d = this.proxy.position.clone().sub(this.drag.start); const v = this.drag.value;
-      d.applyAxisAngle(new THREE.Vector3(0, 1, 0), -this.drag.basisRotation);
-      this.onMove(this.drag.node, this.drag.attr, [v[0] + d.x, v[1] + d.y, v[2] + d.z]);
+      if (!this.drag) return;
+      const worldDelta = this.proxy.position.clone().sub(this.drag.start);
+      const value = localDragValue([worldDelta.x, worldDelta.y, worldDelta.z], this.drag.basisRotation, this.drag.value);
+      // RV-025: when the dragged node has a direct scene object, move it in place and skip the full rebuild.
+      // R3-002: turret offsets are coordinate parents for dependent objects, so a full rebuild is required.
+      if (dragNeedsRebuild(this.drag.node)) {
+        this.drag.value = value;
+        this.onMove(this.drag.node, this.drag.attr, value, true);
+        return;
+      }
+      const object = this.nodeObjects.get(this.drag.node.id);
+      if (object) {
+        object.position.add(worldDelta);
+        this.drag.value = value;
+        this.onMove(this.drag.node, this.drag.attr, value, false);
+      } else {
+        this.onMove(this.drag.node, this.drag.attr, value, true);
+      }
     });
-    this.renderer.domElement.addEventListener('pointerdown', (e) => this.pick(e));
-    const observer = new ResizeObserver(() => this.resize()); observer.observe(host);
+    this.sharedAssets.add(VOXEL_CUBE_GEOMETRY).add(OCCUPANT_MATERIAL);
+    this.renderer.domElement.addEventListener('pointerdown', (e) => { this.pointerDownPos.set(e.clientX, e.clientY); });
+    this.renderer.domElement.addEventListener('pointerup', (e) => {
+      if (this.transform.dragging) return;
+      if (Math.hypot(e.clientX - this.pointerDownPos.x, e.clientY - this.pointerDownPos.y) > this.pickThreshold) return;
+      this.pick(e);
+    });
+    this.resizeObserver = new ResizeObserver(() => this.resize()); this.resizeObserver.observe(host);
     this.addEnvironment(); this.resetCamera(); this.loop();
   }
 
   async setDocument(doc: SourceDocument, catalog: ResourceCatalog, soldier: SoldierAssets | undefined, options: ViewOptions): Promise<void> {
+    const generation = ++this.sceneGeneration;
     this.doc = doc; this.catalog = catalog; this.soldier = soldier; this.options = options; this.transform.detach(); this.drag = undefined; this.startTime = performance.now(); this.lastAnimationUpdate = -Infinity;
     this.clearRoot(); const root = doc.root; if (!root) return;
     const physics = root.children.find((n) => n.name === 'physics'); const globalOffset = vec3(physics ? doc.value(physics, 'visual_offset') : undefined);
     const turrets = root.children.filter((n) => n.name === 'turret');
-    for (const visual of root.children.filter((n) => n.name === 'visual')) {
-      const a = doc.attrs(visual); if (!visualMatchesDamageState(doc, visual, options.showBroken)) continue;
-      const path = catalog.resolve(a.mesh_filename, 'model'); if (!path) continue;
+    const visuals = root.children.filter((n) => n.name === 'visual')
+      .filter((visual) => visualMatchesDamageState(doc, visual, options.showBroken))
+      .flatMap((visual) => {
+        const path = catalog.resolve(doc.attrs(visual).mesh_filename, 'model');
+        return path ? [{ visual, a: doc.attrs(visual), path }] : [];
+      });
+    await mapLimit(visuals, ASSET_CONCURRENCY, async ({ visual, a, path }) => {
+      if (generation !== this.sceneGeneration) return;
       try {
-        const mesh = await this.loadMesh(path); const object = await this.buildMesh(mesh, visual); const own = vec3(a.offset);
+        const mesh = await this.loadMesh(path); if (generation !== this.sceneGeneration) return;
+        const object = await this.buildMesh(path, mesh, visual, generation); if (generation !== this.sceneGeneration) return; const own = vec3(a.offset);
         let origin: Vec3 = [globalOffset[0] + own[0], globalOffset[1] + own[1], globalOffset[2] + own[2]];
         if (a.class === 'tire') {
           const tire = tireVisualPosition(doc, visual);
@@ -71,12 +113,29 @@ export class SceneController {
             object.rotation.y = pose.rotation;
           }
         }
+        if (generation !== this.sceneGeneration) return;
         object.position.set(...origin); object.userData.nodeId = visual.id; object.traverse((o) => o.userData.nodeId = visual.id); this.root.add(object); this.pickTargets.push(object); this.nodeObjects.set(visual.id, object);
-      } catch (error) { console.warn(`模型加载失败：${a.mesh_filename}`, error); }
-    }
-    for (const [index, turret] of turrets.entries()) await this.addWeapon(turret, index, globalOffset);
+      } catch (error) { if (generation === this.sceneGeneration) console.warn(`模型加载失败：${a.mesh_filename}`, error); }
+    });
+    await mapLimit(turrets.map((turret, index) => ({ turret, index })), ASSET_CONCURRENCY, ({ turret, index }) => this.addWeapon(turret, index, globalOffset, generation));
     if (options.showBounds && physics) this.addBounds(physics);
     if (options.showOccupants && soldier) for (const slot of root.children.filter((n) => n.name === 'character_slot')) this.addOccupant(slot, turrets);
+    if (generation === this.sceneGeneration) this.enforceAssetLimits();
+  }
+
+  /** Refresh only the working document reference after a transform-only edit; the scene objects are updated in place (RV-025). */
+  updateDocument(doc: SourceDocument): void { this.doc = doc; }
+
+  /** Drop promise and GPU geometry caches after a forced resource reindex (R3-014/015/016). */
+  invalidateAssetCaches(): void {
+    this.meshCache.clear();
+    this.textureCache.clear();
+    this.voxelCache.clear();
+    for (const geometry of this.geometryCache.values()) {
+      this.sharedAssets.delete(geometry);
+      geometry.dispose();
+    }
+    this.geometryCache.clear();
   }
 
   select(node?: SourceNode): void {
@@ -86,16 +145,40 @@ export class SceneController {
     const target = editablePosition(this.doc, node); if (!target) return;
     const world = object?.position.clone() ?? new THREE.Vector3(...target.value);
     this.proxy.position.copy(world); this.scene.add(this.proxy); this.transform.attach(this.proxy);
-    const turrets = this.doc.root?.children.filter((n) => n.name === 'turret') ?? [];
-    const basisRotation = node.name === 'character_slot' ? characterSlotPose(this.doc, node, turrets).attachmentRotation : 0;
+    const basisRotation = editableBasisRotation(this.doc, node);
     this.drag = { node: target.node, attr: target.attr, value: target.value, start: world.clone(), basisRotation };
+  }
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    cancelAnimationFrame(this.frame);
+    this.resizeObserver?.disconnect();
+    this.controls.dispose();
+    this.transform.dispose();
+    this.renderer.dispose();
+    this.renderer.domElement.remove();
   }
   resetCamera(): void { this.camera.position.set(14, 10, 17); this.controls.target.set(0, 1.5, 0); this.controls.update(); }
   topView(): void { this.camera.position.set(0, 28, 0.01); this.controls.target.set(0, 0, 0); this.controls.update(); }
   sideView(): void { this.camera.position.set(28, 4, 0); this.controls.target.set(0, 1.5, 0); this.controls.update(); }
 
-  private async addWeapon(turret: SourceNode, index: number, global: Vec3): Promise<void> {
-    if (!this.doc || !this.catalog) return; const a = this.doc.attrs(turret); const weapon = await this.catalog.weapon(a.weapon_key); if (!weapon) return;
+  /** Keep app-lifetime GPU geometry cache bounded; never evict geometries used by the current scene (R3-016). */
+  private enforceAssetLimits(): void {
+    const limit = 256;
+    if (this.geometryCache.size <= limit) return;
+    const used = new Set<THREE.BufferGeometry>();
+    this.root.traverse((object: any) => { if (object.geometry) used.add(object.geometry); });
+    for (const [key, geometry] of this.geometryCache) {
+      if (this.geometryCache.size <= limit) break;
+      if (used.has(geometry)) continue;
+      this.geometryCache.delete(key);
+      this.sharedAssets.delete(geometry);
+      geometry.dispose();
+    }
+  }
+
+  private async addWeapon(turret: SourceNode, index: number, global: Vec3, generation: number): Promise<void> {
+    if (!this.doc || !this.catalog) return; const a = this.doc.attrs(turret); const weaponResult = await this.catalog.weapon(a.weapon_key); if (generation !== this.sceneGeneration || !weaponResult.ok) return; const weapon = weaponResult.value;
     try {
       const pose = turretWorldPose(this.doc, this.doc.root?.children.filter((n) => n.name === 'turret') ?? [], index);
       if (!pose) return;
@@ -103,11 +186,11 @@ export class SceneController {
       group.position.set(global[0] + pose.position[0], global[1] + pose.position[1], global[2] + pose.position[2]); group.rotation.y = pose.rotation;
       if (weapon.mesh) {
         const path = this.catalog.resolve(weapon.mesh, 'model');
-        if (path) { const mesh = await this.loadMesh(path); const object = await this.buildMeshWithTextures(mesh, weapon.texture ? [weapon.texture] : []); object.position.set(...weaponOffset); group.add(object); }
+        if (path) { const mesh = await this.loadMesh(path); if (generation !== this.sceneGeneration) return; const object = await this.buildMeshWithTextures(path, mesh, weapon.texture ? [weapon.texture] : [], generation); if (generation !== this.sceneGeneration) return; object.position.set(...weaponOffset); group.add(object); }
       }
       if (weapon.voxelModel) {
         const path = this.catalog.resolve(weapon.voxelModel, 'model');
-        if (path) { const voxels = await this.loadVoxels(path); const object = this.buildVoxelModel(voxels); object.position.set(...weaponOffset); object.rotation.y = WEAPON_LOGICAL_TO_MODEL_YAW; group.add(object); }
+        if (path) { const voxels = await this.loadVoxels(path); if (generation !== this.sceneGeneration) return; const object = this.buildVoxelModel(voxels); object.position.set(...weaponOffset); object.rotation.y = WEAPON_LOGICAL_TO_MODEL_YAW; group.add(object); }
       }
       if (this.options?.showShields) {
         const shieldFrame = new THREE.Group(); shieldFrame.position.set(...weaponOffset); shieldFrame.rotation.y = WEAPON_LOGICAL_TO_MODEL_YAW;
@@ -125,7 +208,7 @@ export class SceneController {
   }
 
   private buildVoxelModel(voxels: StaticVoxel[]): THREE.InstancedMesh {
-    const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.96, 0.96, 0.96), occupantMaterial(), voxels.length); const matrix = new THREE.Matrix4();
+    const mesh = new THREE.InstancedMesh(VOXEL_CUBE_GEOMETRY, OCCUPANT_MATERIAL, voxels.length); const matrix = new THREE.Matrix4();
     voxels.forEach((voxel, index) => { matrix.makeTranslation(voxel.x, voxel.y, voxel.z); mesh.setMatrixAt(index, matrix); mesh.setColorAt(index, new THREE.Color(rwrLinearToDisplay(voxel.r), rwrLinearToDisplay(voxel.g), rwrLinearToDisplay(voxel.b))); });
     mesh.instanceMatrix.needsUpdate = true; if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true; mesh.scale.setScalar(SOLDIER_GAME_SCALE); return mesh;
   }
@@ -142,7 +225,7 @@ export class SceneController {
   private addOccupant(slot: SourceNode, turrets: SourceNode[]): void {
     if (!this.doc || !this.soldier || !this.options || characterSlotHidden(this.doc, slot)) return; const idle = idleState(this.doc, slot); const a = this.doc.attrs(slot); const ia = idle ? this.doc.attrs(idle) : {};
     const slotPose = characterSlotPose(this.doc, slot, turrets); const position = new THREE.Vector3(...slotPose.position); const rotation = slotPose.rotation;
-    const geometry = new THREE.BoxGeometry(0.96, 0.96, 0.96); const material = occupantMaterial();
+    const geometry = VOXEL_CUBE_GEOMETRY; const material = OCCUPANT_MATERIAL;
     const mesh = new THREE.InstancedMesh(geometry, material, this.soldier.voxels.length); mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); mesh.position.copy(position); mesh.rotation.y = rotation; mesh.scale.setScalar(SOLDIER_GAME_SCALE);
     this.soldier.voxels.forEach((v, i) => mesh.setColorAt(i, new THREE.Color(rwrLinearToDisplay(v.r), rwrLinearToDisplay(v.g), rwrLinearToDisplay(v.b))));
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
@@ -152,42 +235,68 @@ export class SceneController {
     this.occupants.push({ mesh, animation, assets: this.soldier, pose: poseBuffer, dynamic: !this.soldier.isStatic(animation) });
   }
 
-  private async buildMesh(mesh: OgreMesh, visual: SourceNode): Promise<THREE.Group> {
+  private async buildMesh(meshPath: string, mesh: OgreMesh, visual: SourceNode, generation: number): Promise<THREE.Group> {
     if (!this.doc) return new THREE.Group(); const a = this.doc.attrs(visual);
     const parts = visual.children.filter((n) => n.name === 'part').map((n) => this.doc!.value(n, 'texture_filename') ?? '');
-    return this.buildMeshWithTextures(mesh, parts.length ? parts : [a.texture_filename ?? '']);
+    return this.buildMeshWithTextures(meshPath, mesh, parts.length ? parts : [a.texture_filename ?? ''], generation);
   }
-  private async buildMeshWithTextures(mesh: OgreMesh, textures: string[]): Promise<THREE.Group> {
+  private async buildMeshWithTextures(meshPath: string, mesh: OgreMesh, textures: string[], generation: number): Promise<THREE.Group> {
     const group = new THREE.Group(); if (!this.catalog) return group;
     for (let i = 0; i < mesh.submeshes.length; i++) {
       const sub = mesh.submeshes[i], data = sub.useSharedVertices ? mesh.sharedGeometry : sub.geometry; if (!data || sub.operationType !== 4) continue;
-      const geometry = new THREE.BufferGeometry(); geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.positions, 3));
-      if (data.normals.length === data.positions.length) geometry.setAttribute('normal', new THREE.Float32BufferAttribute(data.normals, 3)); else geometry.computeVertexNormals();
-      if (data.uvs.length >= data.vertexCount * 2) geometry.setAttribute('uv', new THREE.Float32BufferAttribute(data.uvs, 2)); geometry.setIndex(sub.indices); geometry.computeBoundingSphere();
+      const cacheKey = `${meshPath}:${i}`;
+      let geometry = this.geometryCache.get(cacheKey);
+      if (!geometry) {
+        geometry = new THREE.BufferGeometry(); geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.positions, 3));
+        if (data.normals.length === data.positions.length) geometry.setAttribute('normal', new THREE.Float32BufferAttribute(data.normals, 3)); else geometry.computeVertexNormals();
+        if (data.uvs.length >= data.vertexCount * 2) geometry.setAttribute('uv', new THREE.Float32BufferAttribute(data.uvs, 2)); geometry.setIndex(sub.indices); geometry.computeBoundingSphere();
+        this.geometryCache.set(cacheKey, geometry); this.sharedAssets.add(geometry);
+      }
       const textureName = textures[Math.min(i, textures.length - 1)] || textures[0]; const texturePath = this.catalog.resolve(textureName, 'texture');
-      let map: THREE.Texture | undefined; if (texturePath) try { map = await this.loadTexture(texturePath); } catch { /* fallback material */ }
+      let map: THREE.Texture | undefined; if (texturePath) try { map = await this.loadTexture(texturePath); if (generation !== this.sceneGeneration) return group; } catch { /* fallback material */ }
       const material = new THREE.MeshStandardMaterial({ map, color: map ? 0xffffff : colorFromName(sub.materialName), roughness: 0.78, metalness: 0.08, side: THREE.DoubleSide });
       const part = new THREE.Mesh(geometry, material); part.castShadow = false; part.receiveShadow = false; part.name = sub.name; group.add(part);
     }
     return group;
   }
-  private loadMesh(path: string): Promise<OgreMesh> { let value = this.meshCache.get(path); if (!value) { value = desktop.readBinary(path).then(parseOgreMesh); this.meshCache.set(path, value); } return value; }
-  private loadVoxels(path: string): Promise<StaticVoxel[]> { let value = this.voxelCache.get(path); if (!value) { value = desktop.readText(path).then(parseStaticVoxelModel); this.voxelCache.set(path, value); } return value; }
+  private loadCached<T>(cache: Map<string, Promise<T>>, path: string, load: () => Promise<T>): Promise<T> {
+    const cached = cache.get(path); if (cached) return cached;
+    const pending = load().catch((error) => { cache.delete(path); throw error; });
+    cache.set(path, pending); return pending;
+  }
+  private loadMesh(path: string): Promise<OgreMesh> { return this.loadCached(this.meshCache, path, () => desktop.readBinary(path).then(parseOgreMesh)); }
+  private loadVoxels(path: string): Promise<StaticVoxel[]> { return this.loadCached(this.voxelCache, path, () => desktop.readText(path).then(parseStaticVoxelModel)); }
   private loadTexture(path: string): Promise<THREE.Texture> {
-    let value = this.textureCache.get(path); if (!value) value = desktop.readBinary(path).then((buffer) => new Promise<THREE.Texture>((resolve, reject) => {
-      const ext = path.split('.').at(-1)?.toLowerCase(); if (!['png', 'jpg', 'jpeg', 'bmp'].includes(ext ?? '')) { reject(new Error(`暂不支持浏览器纹理格式 ${ext}`)); return; }
-      const url = URL.createObjectURL(new Blob([buffer])); new THREE.TextureLoader().load(url, (texture) => { URL.revokeObjectURL(url); texture.colorSpace = THREE.SRGBColorSpace; texture.flipY = false; resolve(texture); }, undefined, (e) => { URL.revokeObjectURL(url); reject(e); });
-    })); this.textureCache.set(path, value); return value;
+    return this.loadCached(this.textureCache, path, () => desktop.readBinary(path).then((buffer) => new Promise<THREE.Texture>((resolve, reject) => {
+      const ext = path.split('.').at(-1)?.toLowerCase();
+      if (!['png', 'jpg', 'jpeg', 'bmp'].includes(ext ?? '')) { reject(new Error(`暂不支持浏览器纹理格式 ${ext}`)); return; }
+      const url = URL.createObjectURL(new Blob([buffer]));
+      new THREE.TextureLoader().load(url,
+        (texture) => { URL.revokeObjectURL(url); texture.colorSpace = THREE.SRGBColorSpace; texture.flipY = false; resolve(texture); },
+        undefined,
+        (e) => { URL.revokeObjectURL(url); reject(e); });
+    })));
   }
   private addEnvironment(): void {
     this.scene.add(new THREE.HemisphereLight(0xbacaff, 0x282016, 1.45)); const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(18, 28, 20); key.castShadow = false; this.scene.add(key);
     const rim = new THREE.DirectionalLight(0x769dff, 0.7); rim.position.set(-20, 12, -18); this.scene.add(rim); const grid = new THREE.GridHelper(80, 80, 0x69727c, 0x252c33); grid.position.y = -0.02; this.scene.add(grid);
     const axes = new THREE.AxesHelper(3); this.scene.add(axes);
   }
-  private clearRoot(): void { this.occupants = []; this.pickTargets = []; this.nodeObjects.clear(); while (this.root.children.length) { const child = this.root.children.pop()!; child.traverse((o: any) => { o.geometry?.dispose?.(); if (Array.isArray(o.material)) o.material.forEach((m: any) => m.dispose()); else o.material?.dispose?.(); }); } }
+  private clearRoot(): void {
+    this.occupants = []; this.pickTargets = []; this.nodeObjects.clear();
+    while (this.root.children.length) {
+      const child = this.root.children.pop()!;
+      child.traverse((o: any) => {
+        if (o.geometry && !this.sharedAssets.has(o.geometry)) o.geometry.dispose?.();
+        if (Array.isArray(o.material)) o.material.forEach((m: any) => { if (!this.sharedAssets.has(m)) m.dispose?.(); });
+        else if (o.material && !this.sharedAssets.has(o.material)) o.material.dispose?.();
+      });
+    }
+  }
   private resize(): void { const w = this.host.clientWidth, h = this.host.clientHeight; if (!w || !h) return; this.camera.aspect = w / h; this.camera.updateProjectionMatrix(); this.renderer.setSize(w, h, false); }
   private pick(e: PointerEvent): void { if (this.transform.dragging) return; const r = this.renderer.domElement.getBoundingClientRect(); this.pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1); this.raycaster.setFromCamera(this.pointer, this.camera); const hit = this.raycaster.intersectObjects(this.pickTargets, true).find((x) => findNodeId(x.object) !== undefined); const id = hit ? findNodeId(hit.object) : undefined; if (id !== undefined) this.onSelect(id); }
   private loop = (): void => {
+    if (this.disposed) return;
     this.frame = requestAnimationFrame(this.loop); this.controls.update(); const now = performance.now();
     if (this.options?.animate && now - this.lastAnimationUpdate >= this.animationIntervalMs) { this.updateOccupants((now - this.startTime) / 1000); this.lastAnimationUpdate = now; }
     this.selectedHelper?.update(); this.renderer.render(this.scene, this.camera); this.fpsFrames++;
@@ -203,7 +312,9 @@ export class SceneController {
   }
 }
 
-function occupantMaterial(): THREE.ShaderMaterial {
+const VOXEL_CUBE_GEOMETRY = new THREE.BoxGeometry(0.96, 0.96, 0.96);
+const OCCUPANT_MATERIAL = createOccupantMaterial();
+function createOccupantMaterial(): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
     uniforms: { occupantOpacity: { value: 1 } },
     vertexShader: `

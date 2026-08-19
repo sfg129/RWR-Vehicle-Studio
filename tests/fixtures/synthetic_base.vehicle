@@ -1,0 +1,5 @@
+<vehicle name="synthetic_base">
+  <physics offset="0 0 0" extent="2 1 4"/>
+  <visual class="chassis" mesh_filename="synth_chassis.mesh"/>
+  <turret weapon_key="synth_turret.weapon"/>
+</vehicle>

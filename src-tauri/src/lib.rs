@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Serialize;
 use std::{collections::{BTreeMap, BTreeSet, HashMap, HashSet}, fs, path::{Path, PathBuf}, sync::Mutex};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use walkdir::WalkDir;
 
@@ -31,7 +31,11 @@ struct VehicleWorkspace { root: String, entries: Vec<VehicleWorkspaceEntry> }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct VehicleSchema { object_types: Vec<String>, attributes: BTreeMap<String, Vec<String>> }
+struct VehicleSchema { object_types: Vec<String>, attributes: BTreeMap<String, Vec<String>>, skipped: Vec<String> }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceFolderScan { index: HashMap<String, String>, duplicates: Vec<String>, warnings: Vec<String> }
 
 fn local_path(value: FilePath) -> Result<PathBuf, String> {
     value.into_path().map_err(|_| "只支持本地文件系统路径".to_string())
@@ -59,7 +63,12 @@ async fn open_vehicle(app: AppHandle, state: State<'_, AppState>) -> Result<Opti
 fn resolve_vehicle_base(path: String, reference: String) -> Result<Option<OpenedFile>, String> {
     let current = PathBuf::from(path);
     let Some(parent) = current.parent() else { return Ok(None) };
-    let candidate = parent.join(reference);
+    // RWR base references are logical paths; normalize both / and \\ so
+    // Windows-authored references also resolve on Linux/macOS (R3-026).
+    let mut candidate = parent.to_path_buf();
+    for component in reference.trim().split(|c| c == '/' || c == '\\').filter(|part| !part.is_empty()) {
+        candidate.push(component);
+    }
     if !candidate.is_file() { return Ok(None) }
     Ok(Some(read_vehicle_file(candidate)?))
 }
@@ -120,17 +129,21 @@ fn scan_vehicle_schema(path: String) -> Result<VehicleSchema, String> {
     if !root.is_dir() { return Err("载具工作区路径不是文件夹".into()) }
     let mut object_types = BTreeSet::new();
     let mut attributes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut skipped = Vec::new();
     let mut count = 0usize;
     for entry in WalkDir::new(root).max_depth(13).follow_links(false).into_iter().filter_map(Result::ok) {
         if !entry.file_type().is_file() || !entry.path().extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("vehicle")) { continue }
         count += 1; if count > 10_000 { return Err("载具文件超过 10000 个；请选择更具体的工作区".into()) }
-        let text = decode_text(fs::read(entry.path()).map_err(|e| format!("读取载具结构失败：{e}"))?)?;
-        scan_xml_schema(&text, &mut object_types, &mut attributes);
+        match fs::read(entry.path()).map_err(|e| e.to_string()).and_then(decode_text) {
+            Ok(text) => scan_xml_schema(&text, &mut object_types, &mut attributes),
+            Err(_) => skipped.push(display(entry.path())),
+        }
     }
     attributes.remove("vehicle");
     Ok(VehicleSchema {
         object_types: object_types.into_iter().collect(),
         attributes: attributes.into_iter().map(|(name, values)| (name, values.into_iter().collect())).collect(),
+        skipped,
     })
 }
 
@@ -168,13 +181,12 @@ fn scan_xml_schema(text: &str, object_types: &mut BTreeSet<String>, attributes: 
 fn build_vehicle_workspace(path: PathBuf) -> Result<VehicleWorkspace, String> {
     let root = path.canonicalize().map_err(|e| format!("无法恢复载具工作区：{e}"))?;
     if !root.is_dir() { return Err("载具工作区路径不是文件夹".into()) }
-    let mut count = 0usize;
-    let entries = scan_workspace_entries(&root, 0, &mut count)?;
+    let entries = list_dir_entries(&root)?;
     Ok(VehicleWorkspace { root: display(&root), entries })
 }
 
-fn scan_workspace_entries(path: &Path, depth: usize, count: &mut usize) -> Result<Vec<VehicleWorkspaceEntry>, String> {
-    if depth > 12 { return Ok(Vec::new()) }
+/// List a single directory's immediate children (no recursion); children are populated lazily by the frontend (RV-016).
+fn list_dir_entries(path: &Path) -> Result<Vec<VehicleWorkspaceEntry>, String> {
     let mut paths = fs::read_dir(path).map_err(|e| format!("无法读取工作区目录 {}：{e}", display(path)))?
         .filter_map(Result::ok).map(|entry| entry.path()).collect::<Vec<_>>();
     paths.sort_by(|a, b| {
@@ -183,16 +195,20 @@ fn scan_workspace_entries(path: &Path, depth: usize, count: &mut usize) -> Resul
     });
     let mut result = Vec::with_capacity(paths.len());
     for child in paths {
-        *count += 1;
-        if *count > 10_000 { return Err("载具工作区项目超过 10000 个；请选择更具体的文件夹".into()) }
         let metadata = match fs::symlink_metadata(&child) { Ok(value) => value, Err(_) => continue };
         if metadata.file_type().is_symlink() { continue }
         let is_directory = metadata.is_dir();
         let is_vehicle = metadata.is_file() && child.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("vehicle"));
-        let children = if is_directory { scan_workspace_entries(&child, depth + 1, count)? } else { Vec::new() };
-        result.push(VehicleWorkspaceEntry { name: file_name(&child), path: display(&child), is_directory, is_vehicle, children });
+        result.push(VehicleWorkspaceEntry { name: file_name(&child), path: display(&child), is_directory, is_vehicle, children: Vec::new() });
     }
     Ok(result)
+}
+
+#[tauri::command]
+fn list_workspace_dir(path: String) -> Result<Vec<VehicleWorkspaceEntry>, String> {
+    let dir = PathBuf::from(path).canonicalize().map_err(|e| format!("无法恢复目录：{e}"))?;
+    if !dir.is_dir() { return Err("路径不是文件夹".into()) }
+    list_dir_entries(&dir)
 }
 
 #[tauri::command]
@@ -217,7 +233,7 @@ async fn choose_support_file(app: AppHandle, kind: String) -> Result<Option<Stri
 }
 
 #[tauri::command]
-fn scan_resource_folder(path: String, kind: String) -> Result<HashMap<String, String>, String> {
+fn scan_resource_folder(path: String, kind: String) -> Result<ResourceFolderScan, String> {
     let root = PathBuf::from(path);
     if !root.is_dir() { return Err("所选资源文件夹不存在".into()) }
     let extensions: &[&str] = match kind.as_str() {
@@ -226,16 +242,28 @@ fn scan_resource_folder(path: String, kind: String) -> Result<HashMap<String, St
         "weapon" => &["weapon"],
         _ => return Err("未知资源类型".into()),
     };
-    let mut result = HashMap::new();
-    for entry in WalkDir::new(root).follow_links(false).into_iter().filter_map(Result::ok) {
+    let mut index = HashMap::new();
+    let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
+    let mut warnings = Vec::new();
+    for entry in WalkDir::new(root).sort_by_file_name().follow_links(false) {
+        let entry = match entry { Ok(value) => value, Err(e) => { warnings.push(format!("资源扫描跳过：{e}")); continue } };
         if !entry.file_type().is_file() { continue }
         let p = entry.path();
         let ext = p.extension().and_then(|v| v.to_str()).unwrap_or("");
         if extensions.iter().any(|v| ext.eq_ignore_ascii_case(v)) {
-            result.entry(file_name(p).to_ascii_lowercase()).or_insert_with(|| display(p));
+            let name = file_name(p).to_ascii_lowercase();
+            by_name.entry(name.clone()).or_default().push(display(p));
+            index.entry(name).or_insert_with(|| display(p));
         }
     }
-    Ok(result)
+    let mut duplicates: Vec<String> = by_name.into_iter().filter_map(|(name, mut paths)| {
+        if paths.len() <= 1 { return None }
+        paths.sort();
+        Some(format!("{name} 重复出现 {} 次：{}", paths.len(), paths.join("、")))
+    }).collect();
+    duplicates.sort();
+    warnings.sort();
+    Ok(ResourceFolderScan { index, duplicates, warnings })
 }
 
 #[tauri::command]
@@ -275,33 +303,66 @@ async fn save_vehicle(app: AppHandle, state: State<'_, AppState>, path: String, 
         requested
     };
     let target = ensure_vehicle_extension(target);
-    let backup = if target.exists() {
-        let b = PathBuf::from(format!("{}.bak", display(&target)));
-        fs::copy(&target, &b).map_err(|e| format!("创建备份失败：{e}"))?;
-        Some(b)
-    } else { None };
-    let temp = PathBuf::from(format!("{}.rwrstudio.tmp", display(&target)));
-    fs::write(&temp, text.as_bytes()).map_err(|e| format!("写入临时文件失败：{e}"))?;
-    fs::copy(&temp, &target).map_err(|e| format!("替换载具文件失败：{e}"))?;
-    let _ = fs::remove_file(&temp);
+    let backup = write_backup(&target)?;
+    atomic_write(&target, text.as_bytes())?;
     let canonical = target.canonicalize().map_err(|e| format!("无法确认已保存文件：{e}"))?;
     state.writable.lock().map_err(|_| "文件权限状态不可用")?.insert(canonical.clone());
     Ok(Some(SavedFile { name: file_name(&canonical), path: display(&canonical), backup_path: backup.map(|p| display(&p)) }))
 }
 
 #[tauri::command]
-fn save_weapon(path: String, text: String) -> Result<SavedFile, String> {
+fn save_weapon(path: String, text: String, allowed_roots: Vec<String>) -> Result<SavedFile, String> {
     let target = PathBuf::from(path).canonicalize().map_err(|e| format!("无法确认武器保存路径：{e}"))?;
     if !target.is_file() || !target.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("weapon")) {
         return Err("拒绝保存：目标不是现有的 .weapon 文件".into())
     }
-    let backup = PathBuf::from(format!("{}.bak", display(&target)));
-    fs::copy(&target, &backup).map_err(|e| format!("创建武器备份失败：{e}"))?;
-    let temp = PathBuf::from(format!("{}.rwrstudio.tmp", display(&target)));
-    fs::write(&temp, text.as_bytes()).map_err(|e| format!("写入武器临时文件失败：{e}"))?;
-    fs::copy(&temp, &target).map_err(|e| format!("替换武器文件失败：{e}"))?;
-    let _ = fs::remove_file(&temp);
-    Ok(SavedFile { name: file_name(&target), path: display(&target), backup_path: Some(display(&backup)) })
+    // RV-041: weapon save boundary should be as strict as vehicle save. The frontend
+    // passes the configured weapon folder plus override files; anything outside is rejected.
+    let permitted = allowed_roots.iter().any(|root| {
+        let root_path = PathBuf::from(root);
+        let Ok(root_canon) = root_path.canonicalize() else { return false };
+        if root_canon.is_file() { target == root_canon } else { target.starts_with(&root_canon) }
+    });
+    if !permitted {
+        return Err("拒绝保存：该武器路径不在当前资源配置的允许范围内".into())
+    }
+    let backup = write_backup(&target)?;
+    atomic_write(&target, text.as_bytes())?;
+    Ok(SavedFile { name: file_name(&target), path: display(&target), backup_path: backup.map(|p| display(&p)) })
+}
+
+/// Keep a rolling chain of backups (`.bak`, `.bak1`, `.bak2`); returns the newest backup path.
+fn write_backup(target: &Path) -> Result<Option<PathBuf>, String> {
+    if !target.exists() { return Ok(None) }
+    const GENERATIONS: usize = 3;
+    let backup = PathBuf::from(format!("{}.bak", display(target)));
+    for i in (1..GENERATIONS).rev() {
+        let older = PathBuf::from(format!("{}{i}", display(&backup)));
+        let _ = fs::remove_file(&older);
+        let newer = if i == 1 { backup.clone() } else { PathBuf::from(format!("{}{}", display(&backup), i - 1)) };
+        if newer.exists() { let _ = fs::rename(&newer, &older); }
+    }
+    fs::copy(target, &backup).map_err(|e| format!("创建备份失败：{e}"))?;
+    Ok(Some(backup))
+}
+
+/// Write bytes to a unique same-directory temp file, fsync, then replace the target.
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().and_then(|v| v.to_str()).unwrap_or("file");
+    let unique = format!(".{name}.{}.{}.tmp", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+    let temp = parent.join(unique);
+    let result = (|| -> Result<(), String> {
+        let mut file = fs::File::create(&temp).map_err(|e| format!("创建临时文件失败：{e}"))?;
+        file.write_all(bytes).map_err(|e| format!("写入临时文件失败：{e}"))?;
+        file.sync_all().map_err(|e| format!("同步临时文件失败：{e}"))?;
+        drop(file);
+        fs::rename(&temp, path).map_err(|e| format!("原子替换文件失败：{e}"))?;
+        Ok(())
+    })();
+    if result.is_err() { let _ = fs::remove_file(&temp); }
+    result
 }
 
 fn decode_text(mut bytes: Vec<u8>) -> Result<String, String> {
@@ -330,23 +391,131 @@ mod tests {
     }
 
     #[test]
+    fn resolve_base_normalizes_windows_separators() {
+        let unique = format!("rwrstudio-base-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let dir = std::env::temp_dir().join(&unique);
+        fs::create_dir_all(dir.join("subdir")).unwrap();
+        fs::write(dir.join("subdir").join("base.vehicle"), "<vehicle/>").unwrap();
+        let leaf = dir.join("leaf.vehicle");
+        fs::write(&leaf, r#"<vehicle file="subdir\base.vehicle"/>"#).unwrap();
+        let resolved = resolve_vehicle_base(display(&leaf), r"subdir\base.vehicle".to_string()).expect("base should resolve").expect("base file should exist");
+        assert!(resolved.path.ends_with("base.vehicle"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schema_scan_skips_undecodable_files() {
+        let unique = format!("rwrstudio-schema-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let dir = std::env::temp_dir().join(&unique);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("good.vehicle"), "<vehicle><turret weapon_key=\"x\"/></vehicle>").unwrap();
+        fs::write(dir.join("bad.vehicle"), [0xFFu8, 0xFE, 0x00, 0xFF]).unwrap();
+        fs::write(dir.join("note.txt"), "ignored").unwrap();
+        let schema = scan_vehicle_schema(display(&dir)).expect("无法解析的文件应被跳过而非整体失败");
+        assert!(schema.object_types.contains(&"turret".to_string()));
+        assert_eq!(schema.skipped.len(), 1);
+        assert!(schema.skipped[0].ends_with("bad.vehicle"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resource_scan_reports_duplicate_basenames() {
+        let unique = format!("rwrstudio-scan-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let dir = std::env::temp_dir().join(&unique);
+        fs::create_dir_all(dir.join("a")).unwrap();
+        fs::create_dir_all(dir.join("b")).unwrap();
+        fs::write(dir.join("a/gun.weapon"), "a").unwrap();
+        fs::write(dir.join("b/gun.weapon"), "b").unwrap();
+        fs::write(dir.join("a/rifle.weapon"), "r").unwrap();
+        let scan = scan_resource_folder(display(&dir), "weapon".into()).unwrap();
+        assert_eq!(scan.index.len(), 2);
+        assert!(scan.index.contains_key("gun.weapon") && scan.index.contains_key("rifle.weapon"));
+        assert_eq!(scan.duplicates.len(), 1);
+        assert!(scan.duplicates[0].contains("gun.weapon") && scan.duplicates[0].contains("2 次"));
+        assert!(scan.warnings.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workspace_scan_lists_top_level_without_vehicle_limit() {
+        let unique = format!("rwrstudio-ws-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let dir = std::env::temp_dir().join(&unique);
+        fs::create_dir_all(&dir).unwrap();
+        // A flat directory with many non-.vehicle files must not fail the (now lazy) workspace listing.
+        for i in 0..10_001 { fs::write(dir.join(format!("asset{i}.mesh")), "").unwrap(); }
+        fs::write(dir.join("tank.vehicle"), "<vehicle/>").unwrap();
+        let workspace = scan_vehicle_workspace(display(&dir)).expect("非 .vehicle 文件不应让工作区列举失败");
+        assert_eq!(workspace.entries.len(), 10_002);
+        assert!(workspace.entries.iter().any(|e| e.name == "tank.vehicle" && e.is_vehicle));
+        assert!(workspace.entries.iter().all(|e| e.children.is_empty()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_workspace_dir_returns_immediate_children_only() {
+        let unique = format!("rwrstudio-list-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let dir = std::env::temp_dir().join(&unique);
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("a.vehicle"), "<vehicle/>").unwrap();
+        fs::write(dir.join("readme.txt"), "x").unwrap();
+        fs::write(dir.join("sub/inner.vehicle"), "<vehicle/>").unwrap();
+        let entries = list_workspace_dir(display(&dir)).expect("应能列举单个目录");
+        let names = entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>();
+        assert_eq!(names, vec!["sub", "a.vehicle", "readme.txt"]);
+        assert!(entries.iter().all(|e| e.children.is_empty()));
+        let vehicle = entries.iter().find(|e| e.name == "a.vehicle").unwrap();
+        assert!(vehicle.is_vehicle && !vehicle.is_directory);
+        let sub = entries.iter().find(|e| e.name == "sub").unwrap();
+        assert!(sub.is_directory && !sub.is_vehicle);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn weapon_save_creates_backup_and_replaces_text() {
         let unique = format!("rwrstudio-weapon-save-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
         let path = std::env::temp_dir().join(format!("{unique}.weapon")); let backup = PathBuf::from(format!("{}.bak", display(&path)));
         fs::write(&path, "<weapon><shield offset=\"0 0 0\" extent=\"1 1 1\"/></weapon>").unwrap();
-        let saved = save_weapon(display(&path), "<weapon><shield offset=\"1 2 3\" extent=\"4 5 6\"/></weapon>".into()).unwrap();
+        let saved = save_weapon(display(&path), "<weapon><shield offset=\"1 2 3\" extent=\"4 5 6\"/></weapon>".into(), vec![display(&path)]).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "<weapon><shield offset=\"1 2 3\" extent=\"4 5 6\"/></weapon>");
         assert!(fs::read_to_string(&backup).unwrap().contains("offset=\"0 0 0\"")); assert!(saved.backup_path.as_deref().is_some_and(|value| value.ends_with(".weapon.bak")));
         let _ = fs::remove_file(path); let _ = fs::remove_file(backup);
+    }
+
+    #[test]
+    fn save_rotates_backup_generations_and_leaves_no_temp() {
+        let unique = format!("rwrstudio-rolling-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let path = std::env::temp_dir().join(format!("{unique}.weapon"));
+        fs::write(&path, "<weapon>v0</weapon>").unwrap();
+        for v in 1..=4 { save_weapon(display(&path), format!("<weapon>v{v}</weapon>"), vec![display(&path)]).unwrap(); }
+        assert_eq!(fs::read_to_string(&path).unwrap(), "<weapon>v4</weapon>");
+        let bak = PathBuf::from(format!("{}.bak", display(&path)));
+        let bak1 = PathBuf::from(format!("{}.bak1", display(&path)));
+        let bak2 = PathBuf::from(format!("{}.bak2", display(&path)));
+        assert_eq!(fs::read_to_string(&bak).unwrap(), "<weapon>v3</weapon>");
+        assert_eq!(fs::read_to_string(&bak1).unwrap(), "<weapon>v2</weapon>");
+        assert_eq!(fs::read_to_string(&bak2).unwrap(), "<weapon>v1</weapon>");
+        let parent = path.parent().unwrap();
+        let leftover_temp = fs::read_dir(parent).unwrap().filter_map(Result::ok)
+            .any(|e| e.file_name().to_string_lossy().starts_with(&format!(".{unique}.weapon.")) && e.file_name().to_string_lossy().ends_with(".tmp"));
+        assert!(!leftover_temp, "临时文件未被清理");
+        let _ = fs::remove_file(&path); let _ = fs::remove_file(&bak); let _ = fs::remove_file(&bak1); let _ = fs::remove_file(&bak2);
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![open_vehicle, open_vehicle_path, resolve_vehicle_base, choose_vehicle_base, choose_vehicle_workspace, scan_vehicle_workspace, scan_vehicle_schema,
+        .invoke_handler(tauri::generate_handler![open_vehicle, open_vehicle_path, resolve_vehicle_base, choose_vehicle_base, choose_vehicle_workspace, scan_vehicle_workspace, scan_vehicle_schema, list_workspace_dir,
             choose_folder, choose_override_file, choose_support_file,
             scan_resource_folder, read_text_path, read_builtin_support, read_binary_base64, save_vehicle, save_weapon])
         .run(tauri::generate_context!())

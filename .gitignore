@@ -1,4 +1,9 @@
+# JavaScript / npm
+node_modules/
+.npm/
 
+# Frontend and Tauri build outputs
+dist/
 release/
 src-tauri/target/
 src-tauri/gen/
@@ -25,7 +30,7 @@ Desktop.ini
 !.env.example
 
 # Local scratch directory and RWR assets used for manual checks
-
+/Core/
 /*.vehicle
 /*.weapon
 /*.mesh
