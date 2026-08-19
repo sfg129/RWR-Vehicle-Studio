@@ -49,6 +49,76 @@ const weaponSessions = new Map<string, WeaponSession>(); const weaponSession = r
 const lastEditedDoc = ref<'vehicle' | string>('vehicle');
 const saving = ref(false);
 
+// 灾难关闭快速备份：脏状态确认退出时写入 localStorage，下次启动提示恢复。
+const RECOVERY_KEY = 'rwr-vehicle-studio.recovery.v1';
+interface RecoverySnapshot {
+  timestamp: number;
+  vehicle?: { name: string; path: string; workingText: string; savedText: string };
+  weapons: { key: string; path: string; name: string; workingText: string; savedText: string }[];
+}
+function captureRecoverySnapshot(): void {
+  const vehicle = document.value && opened.value && document.value.serialize() !== savedText.value
+    ? { name: opened.value.name, path: opened.value.path, workingText: document.value.serialize(), savedText: savedText.value }
+    : undefined;
+  const weapons = [...weaponSessions.values()]
+    .filter((session) => session.document.serialize() !== session.savedText)
+    .map((session) => ({ key: session.key, path: session.path, name: session.name, workingText: session.document.serialize(), savedText: session.savedText }));
+  if (!vehicle && !weapons.length) { localStorage.removeItem(RECOVERY_KEY); return; }
+  const recovery: RecoverySnapshot = { timestamp: Date.now(), vehicle, weapons };
+  try { localStorage.setItem(RECOVERY_KEY, JSON.stringify(recovery)); }
+  catch { /* localStorage 容量不足时放弃快速备份，不阻断退出 */ }
+}
+function readRecoverySnapshot(): RecoverySnapshot | null {
+  try {
+    const raw = localStorage.getItem(RECOVERY_KEY); if (!raw) return null;
+    const parsed = JSON.parse(raw) as RecoverySnapshot;
+    if (!parsed.vehicle && !parsed.weapons?.length) return null;
+    return parsed;
+  } catch { localStorage.removeItem(RECOVERY_KEY); return null; }
+}
+async function applyRecoverySnapshot(recovery: RecoverySnapshot): Promise<void> {
+  localStorage.removeItem(RECOVERY_KEY);
+  if (recovery.vehicle) {
+    opened.value = { name: recovery.vehicle.name, path: recovery.vehicle.path, text: recovery.vehicle.workingText };
+    document.value = new SourceDocument(recovery.vehicle.workingText);
+    savedText.value = recovery.vehicle.savedText;
+    undoStack.value = []; missing.value = []; collapsedGroups.clear();
+    markDocumentChanged();
+    await resolveAutomaticBase();
+    rebuildPreview(false);
+    if (hasRememberedResources.value) {
+      status.value = `已恢复 ${opened.value.name} 的未保存修改；正在载入资源…`;
+      await indexRememberedResources(rememberedSelection, vehicleLoadToken);
+    } else {
+      status.value = `已恢复 ${opened.value.name} 的未保存修改；请配置资源文件夹`;
+      await loadSoldier();
+      resourceDialog.value = true;
+    }
+  }
+  for (const item of recovery.weapons) {
+    if (weaponSessions.has(item.path)) continue;
+    const session: WeaponSession = { key: item.key, path: item.path, name: item.name, document: new SourceDocument(item.workingText), savedText: item.savedText, undoStack: [] };
+    weaponSessions.set(item.path, session);
+    try { await desktop.registerWeaponSession(item.path); } catch { /* 路径不可用则跳过注册，保存时会提示 */ }
+  }
+  updateWeaponDirtyCount();
+  markDocumentChanged();
+}
+async function maybeOfferRecovery(): Promise<void> {
+  const recovery = readRecoverySnapshot(); if (!recovery) return;
+  let confirmed = false;
+  try {
+    confirmed = await tauriConfirm('检测到上次未保存修改的快速备份，是否恢复？', {
+      title: 'RWR Vehicle Studio',
+      kind: 'warning',
+      okLabel: '恢复',
+      cancelLabel: '丢弃备份',
+    });
+  } catch { confirmed = window.confirm('检测到上次未保存修改的快速备份，是否恢复？'); }
+  if (!confirmed) { localStorage.removeItem(RECOVERY_KEY); return; }
+  await applyRecoverySnapshot(recovery);
+}
+
 const groups = computed(() => {
   const labels: Record<string, string> = { physics: '基础 / 碰撞', control: '操控', tire: '轮组', turret: '炮塔与武器', visual: '外观模型', slot: '乘员位置', other: '其它对象' };
   return Object.entries(labels).map(([kind, label]) => ({ kind, label, items: entries.value.filter((e) => e.kind === kind) })).filter((g) => g.items.length);
@@ -517,8 +587,7 @@ onMounted(async () => {
   try {
     const appWindow = getCurrentWindow();
     unlistenClose = await appWindow.onCloseRequested(async (event) => {
-      // Windows 当前默认 window-close 链无法可靠完成。closeRequested 只作为退出请求入口。
-      event.preventDefault();
+      // Windows 默认 window-close 链不可靠：clean/confirmed 直接 exit(0)，仅在用户取消关闭时 preventDefault。
       if (exiting) return;
       if (anyDirty.value) {
         const confirmed = await tauriConfirm('有未保存修改，仍要退出吗？', {
@@ -527,7 +596,8 @@ onMounted(async () => {
           okLabel: '退出',
           cancelLabel: '取消',
         });
-        if (!confirmed) return;
+        if (!confirmed) { event.preventDefault(); return; }
+        captureRecoverySnapshot();
       }
       exiting = true;
       try {
@@ -539,6 +609,7 @@ onMounted(async () => {
     });
   } catch { /* 纯浏览器 / 非 Tauri runtime 时没有原生 close guard */ }
   await restoreVehicleWorkspace(); nextTick();
+  await maybeOfferRecovery();
 });
 onBeforeUnmount(() => {
   unlistenClose?.();
