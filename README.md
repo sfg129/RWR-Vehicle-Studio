@@ -13,6 +13,7 @@ RWR Vehicle Studio is an offline visual vehicle editor for _Running With Rifles_
 - 显示载具外观、损毁外观、碰撞框、炮塔、武器模型、护盾范围以及动画乘员；
 - 按游戏规则处理载具基础文件、父炮塔、乘员 `attached_on_turret`、`rotation` 和 `hiding`；
 - 在属性面板中编辑 XML 数值，支持增加/删除对象与属性、撤销和 `Ctrl+Z`；
+- 快捷键：`Ctrl+O` 打开载具，`Ctrl+R` 重新载入，`Ctrl+S` 保存，`Ctrl+Shift+S` 另存为，`Ctrl+Z` 撤销（macOS 使用 `Cmd` 修饰键）；
 - 编辑武器的一个或多个 `<shield>`，并通过独立命令保存回对应 `.weapon`；
 - 常规保存只写回载具 XML，不修改模型、纹理、人物模型或动画文件；
 - 人物显示比例固定为经游戏内校准的 `0.04`。

@@ -36,6 +36,8 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 1px color-mix(in sr
 .divider { width: 1px; height: 28px; margin: 0 6px; background: var(--border-light); }
 .file-badge { display: flex; flex-direction: column; align-items: flex-end; min-width: 150px; padding: 6px 9px; border-right: 3px solid #5a6770; background: var(--surface-1); text-align: right; }
 .file-badge b { max-width: 220px; font-size: 13px; }.file-badge span { color: var(--muted); font-size: 11px; }.file-badge.active { border-right-color: var(--accent); }
+.file-badge.dirty { animation: file-badge-blink 6s ease-in-out infinite; }
+@keyframes file-badge-blink { 0%, 100% { border-right-color: var(--accent); } 50% { border-right-color: #5a6770; } }
 .workspace { display: grid; grid-template-columns: 285px minmax(420px, 1fr) 370px; min-height: 0; }
 .scene-panel, .inspector { min-height: 0; overflow: auto; background: #101417; }.scene-panel { border-right: 2px solid var(--border); }.inspector { border-left: 2px solid var(--border); }
 .panel-title { padding: 13px 13px 9px; border-bottom: 1px solid var(--border); }.panel-title h2 { margin: 3px 0 0; font-size: 17px; }

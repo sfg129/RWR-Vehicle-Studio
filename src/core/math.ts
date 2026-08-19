@@ -13,3 +13,9 @@ export function isValidVec3(value: string): boolean {
   const parts = value.trim().split(/\s+/).filter(Boolean);
   return parts.length === 3 && parts.every((part) => Number.isFinite(Number(part)));
 }
+export function isValidNonNegativeInteger(value: string): boolean {
+  const text = value.trim();
+  if (text === '') return false;
+  const number = Number(text);
+  return Number.isInteger(number) && number >= 0;
+}

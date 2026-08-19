@@ -16,7 +16,7 @@
   "packageManager": "bun@1.3.14",
   "scripts": {
     "dev": "tauri dev",
-    "build": "vue-tsc --noEmit && tauri build",
+    "build": "tauri build",
     "build:frontend": "vue-tsc --noEmit && vite build",
     "test": "vitest run"
   },
@@ -27,6 +27,7 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4",
+    "@types/node": "^26.2.0",
     "@types/three": "^0.185.4",
     "@vitejs/plugin-vue": "^6.0.8",
     "typescript": "^5.9.3",

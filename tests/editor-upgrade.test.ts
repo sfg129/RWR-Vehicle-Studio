@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { SourceDocument } from '../src/core/xml/source-document';
-import { parseWeaponDefinition, ResourceCatalog } from '../src/core/resources/resource-catalog';
+import { parseWeaponDefinition, ResourceCatalog, StaleResourceApplyError } from '../src/core/resources/resource-catalog';
 import { parseStaticVoxelModel } from '../src/core/voxel/voxel-model';
 import { localDragValue, visualMatchesDamageState, weaponExtentToModel, weaponLogicalToModel, WEAPON_LOGICAL_TO_MODEL_YAW } from '../src/core/vehicle/vehicle-model';
 import { composeVehicle } from '../src/core/vehicle/vehicle-composition';
-import { desktop } from '../src/platform/desktop-api';
-import { isValidNumber, isValidVec3 } from '../src/core/math';
+import { desktop, type ResourceFolderScan } from '../src/platform/desktop-api';
+import { isValidNonNegativeInteger, isValidNumber, isValidVec3 } from '../src/core/math';
 import { SoldierAssets } from '../src/core/soldier/soldier-assets';
 import { loadSoldierAssets } from '../src/core/soldier/soldier-loader';
 
@@ -45,6 +45,13 @@ describe('恢复本项（RV-009）', () => {
     expect(document.value(document.descendants('visual')[0], 'offset')).toBe('1 0 0');
     expect(document.value(document.descendants('turret')[0], 'offset')).toBe('5 0 0');
   });
+  it('同级节点删除后 revertNode 仍恢复到原节点的保存快照（R3-008）', () => {
+    const document = new SourceDocument('<vehicle><visual class="A" offset="1 0 0"/><visual class="B" offset="2 0 0"/></vehicle>');
+    document.removeNode(document.descendants('visual')[0]);
+    document.set(document.descendants('visual')[0], 'offset', '9 9 9');
+    document.revertNode(document.descendants('visual')[0]);
+    expect(document.value(document.descendants('visual')[0], 'offset')).toBe('2 0 0');
+  });
   it('restoreSaved 后 revertNode 恢复到真实保存快照而非 undo 快照', () => {
     const saved = '<vehicle><visual offset="1 0 0"/></vehicle>';
     const document = new SourceDocument(saved);
@@ -59,6 +66,11 @@ describe('恢复本项（RV-009）', () => {
 });
 
 describe('武器预览资源', () => {
+  it('parseWeaponDefinition 拒绝根元素不是 weapon 或存在结构问题的武器 XML（R3-010）', () => {
+    expect(() => parseWeaponDefinition('<model/>', 'bad.weapon')).toThrow('根元素不是 <weapon>');
+    expect(() => parseWeaponDefinition('<weapon><shield offset="1 2 3"></weapon>', 'bad.weapon')).toThrow('结构问题');
+    expect(() => parseWeaponDefinition('<weapon/>', 'ok.weapon')).not.toThrow();
+  });
   it('识别 XML 体素模型和全部护盾范围', () => {
     const weapon = parseWeaponDefinition('<weapon><model filename="weapon_m18.xml"/><shield offset="0 0.55 0.7" extent="0.75 4 4"/><shield offset="1 2 3" extent="4 5 6"/></weapon>', 'test.weapon');
     expect(weapon.voxelModel).toBe('weapon_m18.xml');
@@ -190,6 +202,20 @@ describe('资源目录事务（RV-011）', () => {
     } finally { scan.mockRestore(); }
   });
 
+  it('applyFolders 旧调用输给新调用时抛出 StaleResourceApplyError 且不提交旧状态（R3-005）', async () => {
+    const scan = vi.spyOn(desktop, 'scanFolder').mockImplementation(async (path: string, kind: string) => ({ index: { [`${kind}-${path}`]: `${path}/${kind}` }, duplicates: [], warnings: [] }));
+    try {
+      const catalog = new ResourceCatalog();
+      const oldApply = catalog.applyFolders({ model: 'old', texture: 'old', weapon: 'old' });
+      const newApply = catalog.applyFolders({ model: 'new', texture: 'new', weapon: 'new' });
+      await newApply;
+      await expect(oldApply).rejects.toBeInstanceOf(StaleResourceApplyError);
+      expect(catalog.folders).toEqual({ model: 'new', texture: 'new', weapon: 'new' });
+      expect(catalog.indexes.model).toEqual({ 'model-new': 'new/model' });
+      expect(catalog.indexes.weapon).toEqual({ 'weapon-new': 'new/weapon' });
+    } finally { scan.mockRestore(); }
+  });
+
   it('applyFolders 全部成功时原子提交，空目录得到空索引', async () => {
     const scan = vi.spyOn(desktop, 'scanFolder').mockImplementation(async (path: string, kind: string) => ({ index: { [`${kind}_file`]: `${path}/${kind}_file` }, duplicates: [], warnings: [] }));
     try {
@@ -205,7 +231,7 @@ describe('资源目录事务（RV-011）', () => {
 
 describe('资源扫描诊断（RV-019 / RV-057）', () => {
   it('applyFolders 聚合重复文件与扫描警告到 scanDiagnostics', async () => {
-    const scan = vi.spyOn(desktop, 'scanFolder').mockImplementation(async (path: string, kind: string) => {
+    const scan = vi.spyOn(desktop, 'scanFolder').mockImplementation(async (path: string, kind: string): Promise<ResourceFolderScan> => {
       if (kind === 'weapon') return { index: { 'gun.weapon': `${path}/gun.weapon` }, duplicates: ['gun.weapon 重复出现 2 次：a、b'], warnings: ['资源扫描跳过：权限不足'] };
       return { index: {}, duplicates: [], warnings: [] };
     });
@@ -314,6 +340,8 @@ describe('XML 结构诊断（RV-031）', () => {
     expect(unclosed.structuralErrors.some((e) => e.includes('未闭合'))).toBe(true);
     const orphan = new SourceDocument('<vehicle></vehicle></turret>');
     expect(orphan.structuralErrors.some((e) => e.includes('意外'))).toBe(true);
+    const multiRoot = new SourceDocument('<vehicle/><vehicle/>');
+    expect(multiRoot.structuralErrors.some((e) => e.includes('根元素数量'))).toBe(true);
   });
   it('结构良好的 XML 不产生 structuralErrors，且提交后仍保持良好', () => {
     const doc = new SourceDocument('<vehicle><turret weapon_key="x"/><visual class="a"/></vehicle>');
@@ -336,6 +364,11 @@ describe('严格数值/vec3 输入（RV-032）', () => {
     expect(isValidVec3('1 2 abc')).toBe(false);
     expect(isValidVec3('1 2 3 4')).toBe(false);
     expect(isValidVec3('')).toBe(false);
+    expect(isValidNonNegativeInteger('0')).toBe(true);
+    expect(isValidNonNegativeInteger('12')).toBe(true);
+    expect(isValidNonNegativeInteger('-1')).toBe(false);
+    expect(isValidNonNegativeInteger('1.5')).toBe(false);
+    expect(isValidNonNegativeInteger('abc')).toBe(false);
   });
 });
 

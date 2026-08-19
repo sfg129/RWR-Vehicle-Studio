@@ -32,5 +32,5 @@ export const desktop = {
   },
   saveVehicle: (path: string, text: string, saveAs = false) =>
     invoke<SavedFile | null>('save_vehicle', { path, text, saveAs }),
-  saveWeapon: (path: string, text: string) => invoke<SavedFile>('save_weapon', { path, text }),
+  saveWeapon: (path: string, text: string, allowedRoots: string[]) => invoke<SavedFile>('save_weapon', { path, text, allowedRoots }),
 };

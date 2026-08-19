@@ -5,13 +5,13 @@ import type { SourceDocument, SourceNode } from '../core/xml/source-document';
 import type { ResourceCatalog } from '../core/resources/resource-catalog';
 import type { SoldierAssets } from '../core/soldier/soldier-assets';
 
-const props = defineProps<{ document?: SourceDocument; catalog: ResourceCatalog; soldier?: SoldierAssets; options: ViewOptions; selectedId?: number; revision: number; vehicleKey?: string }>();
+const props = defineProps<{ document?: SourceDocument; catalog: ResourceCatalog; soldier?: SoldierAssets; options: ViewOptions; selectedId?: number; revision: number; vehicleKey?: string; resourceGeneration?: number }>();
 const emit = defineEmits<{ select: [number]; move: [SourceNode, string, [number, number, number], boolean] }>();
 const host = ref<HTMLElement>(); const fps = ref(0); const dynamicOccupants = ref(0); const fading = ref(false);
 let controller: SceneController | undefined; let lastVehicleKey: string | undefined;
 onMounted(() => { controller = new SceneController(host.value!, (id) => emit('select', id), (node, attr, value, needsRebuild) => emit('move', node, attr, value, needsRebuild),
   (value, dynamic) => { fps.value = value; dynamicOccupants.value = dynamic; }); refresh(); });
-onBeforeUnmount(() => { /* window lifetime owns renderer */ });
+onBeforeUnmount(() => { controller?.dispose(); controller = undefined; });
 async function refresh() {
   if (!controller || !props.document) return;
   const switched = props.vehicleKey !== lastVehicleKey; lastVehicleKey = props.vehicleKey;
@@ -28,6 +28,7 @@ function scheduleRefresh() {
   requestAnimationFrame(() => { refreshPending = false; void refresh(); });
 }
 watch(() => [props.revision, props.soldier, props.options.showBroken, props.options.showOccupants, props.options.showBounds, props.options.showShields], scheduleRefresh);
+watch(() => props.resourceGeneration, () => { controller?.invalidateAssetCaches(); scheduleRefresh(); });
 watch(() => props.document, (doc) => { if (doc) controller?.updateDocument(doc); });
 watch(() => props.selectedId, select);
 defineExpose({ reset: () => controller?.resetCamera(), top: () => controller?.topView(), side: () => controller?.sideView() });

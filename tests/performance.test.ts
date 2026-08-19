@@ -28,7 +28,12 @@ describe('性能基准（质量门控）', () => {
     const document = new SourceDocument(buildVehicle(500));
     const visuals = document.descendants('visual');
     for (let i = 0; i < 20; i++) document.set(visuals[i], 'offset', '1 2 3');
-    expect(medianTime(() => document.serialize(), 200)).toBeLessThan(50);
+    let toggle = false;
+    expect(medianTime(() => {
+      toggle = !toggle;
+      document.set(visuals[0], 'offset', toggle ? '1 2 3' : '4 5 6');
+      return document.serialize();
+    }, 200)).toBeLessThan(50);
   });
 
   it('serialize 缓存命中（无变更重复序列化）中位耗时 < 5ms', () => {

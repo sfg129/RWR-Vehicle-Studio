@@ -10,6 +10,8 @@ export interface SourceAttribute {
 
 export interface SourceNode {
   id: number;
+  /** Stable identity for revert across structural edits (survives commit reparse). */
+  originId: number;
   name: string;
   attributes: SourceAttribute[];
   children: SourceNode[];
@@ -59,20 +61,19 @@ export class SourceDocument {
   restoreSaved(snapshot: string): void { this.saved = snapshot; }
   /** Restore this node's subtree to the saved snapshot, preserving pending edits on other nodes. */
   revertNode(node: SourceNode): void {
+    const originId = node.originId;
     const savedDoc = new SourceDocument(this.saved);
-    const savedNode = nodeAtPath(savedDoc.root, pathOf(node));
+    const savedNode = savedDoc.nodes[originId] ?? savedDoc.nodes.find((n) => n.originId === originId);
     if (!savedNode) return;
     const savedRaw = savedDoc.raw(savedNode);
-    const outside: { path: number[]; attr: string; value: string }[] = [];
-    for (const n of this.nodes) {
-      if (n.start >= node.start && n.endTagEnd <= node.endTagEnd) continue;
-      for (const attr of n.attributes) {
-        const changed = this.changes.get(this.key(n, attr.name));
-        if (changed !== undefined) outside.push({ path: pathOf(n), attr: attr.name, value: changed });
-      }
-    }
-    this.commit(this.source.slice(0, node.start) + savedRaw + this.source.slice(node.endTagEnd));
-    for (const pending of outside) { const target = nodeAtPath(this.root, pending.path); if (target) this.set(target, pending.attr, pending.value); }
+    // Materialize pending edits first so they become part of the source text and are
+    // preserved by the subsequent structural replace without path-based reapplication.
+    this.materialize();
+    const current = this.nodes[originId] ?? this.nodes.find((n) => n.originId === originId);
+    if (!current) return;
+    this.commit(this.source.slice(0, current.start) + savedRaw + this.source.slice(current.endTagEnd));
+    const restored = this.nodes.find((n) => n.start === current.start) ?? this.nodes[originId];
+    if (restored) restored.originId = originId;
   }
   addAttribute(node: SourceNode, name: string, value = '0'): void {
     const id = node.id; this.materialize(); const current = this.nodes[id];
@@ -119,7 +120,16 @@ export class SourceDocument {
     else if (this.source[end] === '\n') end += 1;
     this.commit(this.source.slice(0, start) + this.source.slice(end));
   }
-  commit(serialized: string): void { this.source = serialized; this.changes.clear(); this.roots.length = 0; this.nodes.length = 0; this.serializedCache = undefined; this.parse(); }
+  commit(serialized: string): void {
+    const oldNodes = this.nodes.map((node) => ({ raw: this.currentRaw(node), originId: node.originId }));
+    this.source = serialized; this.changes.clear(); this.roots.length = 0; this.nodes.length = 0; this.serializedCache = undefined; this.parse();
+    const byRaw = new Map<string, number[]>();
+    for (const old of oldNodes) { const queue = byRaw.get(old.raw); if (queue) queue.push(old.originId); else byRaw.set(old.raw, [old.originId]); }
+    for (const node of this.nodes) {
+      const queue = byRaw.get(this.currentRaw(node));
+      if (queue && queue.length) node.originId = queue.shift()!;
+    }
+  }
 
   serialize(): string {
     if (this.serializedCache !== undefined) return this.serializedCache;
@@ -182,7 +192,7 @@ export class SourceDocument {
       const nameMatch = inner.match(/^\s*([\w:.-]+)/);
       if (!nameMatch) { i = end + 1; continue; }
       const name = nameMatch[1];
-      const node: SourceNode = { id: this.nodes.length, name, attributes: [], children: [], parent: stack.at(-1) ?? null,
+      const node: SourceNode = { id: this.nodes.length, originId: this.nodes.length, name, attributes: [], children: [], parent: stack.at(-1) ?? null,
         start, startTagEnd: end + 1, endTagStart: end + 1, endTagEnd: end + 1, selfClosing: /\/\s*$/.test(inner) };
       const attrOffset = start + 1;
       const attrPattern = /([A-Za-z_:][\w:.-]*)\s*=\s*(["'])(.*?)\2/gs;
@@ -202,6 +212,7 @@ export class SourceDocument {
       i = end + 1;
     }
     for (const unclosed of stack) { unclosed.endTagEnd = this.source.length; this.structuralErrors.push(`标签未闭合：<${unclosed.name}>`); }
+    if (this.roots.length !== 1) this.structuralErrors.push(`XML 根元素数量应为 1，实际为 ${this.roots.length}`);
   }
 }
 

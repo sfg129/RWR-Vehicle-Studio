@@ -138,6 +138,15 @@ export function localDragValue(worldDelta: Vec3, basisRotation: number, current:
   return [current[0] + local[0], current[1] + local[1], current[2] + local[2]];
 }
 
+/**
+ * True when moving this node's editable transform requires a full scene rebuild.
+ * Turret offsets parent other turrets / turret visuals / attached occupants, so
+ * an in-place Object3D move would leave all dependent world poses stale (R3-002).
+ */
+export function dragNeedsRebuild(node: SourceNode): boolean {
+  return node.name === 'turret';
+}
+
 /** RWR weapon collision data is X-forward, while OGRE weapon models are Z-forward. */
 export const WEAPON_LOGICAL_TO_MODEL_YAW = -Math.PI / 2;
 export function weaponLogicalToModel(value: Vec3): Vec3 { return rotateY(value, WEAPON_LOGICAL_TO_MODEL_YAW); }

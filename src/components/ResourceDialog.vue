@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue';
 import { desktop, type ResourceKind } from '../platform/desktop-api';
-import type { ResourceCatalog } from '../core/resources/resource-catalog';
+import { StaleResourceApplyError, type ResourceCatalog } from '../core/resources/resource-catalog';
 import {
   BUILTIN_SUPPORT_ANIMATIONS,
   BUILTIN_SUPPORT_MODEL,
@@ -23,7 +23,7 @@ const presetName = ref(presets.value.find((preset) => preset.id === selectedPres
 const folders = reactive({ ...props.catalog.folders });
 const model = ref(props.supportModel || BUILTIN_SUPPORT_MODEL);
 const animations = ref(props.supportAnimations || BUILTIN_SUPPORT_ANIMATIONS);
-const busy = ref(''); const indexing = ref(false);
+const busy = ref(''); const indexing = ref(false); let applyToken = 0;
 const selectedPreset = computed(() => presets.value.find((preset) => preset.id === selectedPresetId.value));
 async function choose(kind: ResourceKind) { const path = await desktop.chooseFolder(); if (path) folders[kind] = path; }
 async function support(kind: 'model' | 'animation') { const path = await desktop.chooseSupportFile(kind); if (path) (kind === 'model' ? model : animations).value = path; }
@@ -51,19 +51,25 @@ function removePreset() {
 function restoreSupport(kind: 'model' | 'animation') { if (kind === 'model') model.value = BUILTIN_SUPPORT_MODEL; else animations.value = BUILTIN_SUPPORT_ANIMATIONS; }
 function supportLabel(path: string, kind: 'model' | 'animation'): string { return isBuiltinSupport(path) ? `内置：${kind === 'model' ? 'Normandy Ranger 人物模型' : 'RWR 人物动画'}` : path; }
 async function apply() {
+  const token = ++applyToken;
   indexing.value = true; busy.value = '正在递归建立资源索引…';
   try {
     await props.catalog.applyFolders({ ...folders }, true);
+    if (token !== applyToken) return;
     const selection = currentSelection();
     saveResourcePreferences({ presets: presets.value, activePresetId: selectedPresetId.value, lastSelection: cloneResourceSelection(selection) });
     emit('apply', selection);
-  } catch (error) { busy.value = `载入失败：${error instanceof Error ? error.message : String(error)}`; }
-  finally { indexing.value = false; }
+  } catch (error) {
+    if (token !== applyToken) return;
+    busy.value = error instanceof StaleResourceApplyError
+      ? '资源索引已被更新操作接管。'
+      : `载入失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally { if (token === applyToken) indexing.value = false; }
 }
 </script>
 <template>
   <div class="modal-backdrop"><section class="dialog resource-dialog">
-    <header><div><small>RESOURCE WORKSPACE</small><h2>资源文件夹与人物预览</h2></div><button class="icon" @click="$emit('close')">×</button></header>
+    <header><div><small>RESOURCE WORKSPACE</small><h2>资源文件夹与人物预览</h2></div><button class="icon" :disabled="indexing" @click="$emit('close')">×</button></header>
     <p class="muted">选择三个上层文件夹后会递归索引同名资源；不要求逐个选取。单文件例外请在主界面“文件覆盖”中指定。</p>
     <section class="preset-box">
       <strong>资源路径预设</strong>
@@ -77,6 +83,6 @@ async function apply() {
     <hr />
     <label class="field-row path-row support-row"><span>乘员模型</span><input :value="supportLabel(model, 'model')" readonly /><button @click="support('model')">更改</button><button :disabled="model === BUILTIN_SUPPORT_MODEL" @click="restoreSupport('model')">恢复默认</button></label>
     <label class="field-row path-row support-row"><span>动画文件</span><input :value="supportLabel(animations, 'animation')" readonly /><button @click="support('animation')">更改</button><button :disabled="animations === BUILTIN_SUPPORT_ANIMATIONS" @click="restoreSupport('animation')">恢复默认</button></label>
-    <footer><span class="muted">{{ busy }}</span><button @click="$emit('close')">取消</button><button class="primary" :disabled="indexing" @click="apply">建立索引并载入</button></footer>
+    <footer><span class="muted">{{ busy }}</span><button :disabled="indexing" @click="$emit('close')">取消</button><button class="primary" :disabled="indexing" @click="apply">建立索引并载入</button></footer>
   </section></div>
 </template>

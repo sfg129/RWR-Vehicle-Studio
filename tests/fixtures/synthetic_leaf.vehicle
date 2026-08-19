@@ -1,0 +1,3 @@
+<vehicle file="synthetic_base.vehicle">
+  <visual class="chassis" mesh_filename="synth_chassis_alt.mesh" offset="0 0.1 0"/>
+</vehicle>

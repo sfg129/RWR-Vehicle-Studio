@@ -10,8 +10,16 @@ export interface WeaponModel { sourcePath: string; mesh?: string; voxelModel?: s
 export type ResourceFailureKind = 'missing' | 'read_error' | 'parse_error';
 export type ResourceResult<T> = { ok: true; value: T } | { ok: false; kind: ResourceFailureKind; message: string };
 
+/** Thrown when an older applyFolders() invocation loses to a newer one (R3-005). */
+export class StaleResourceApplyError extends Error {
+  constructor() { super('Resource scan superseded by a newer apply'); this.name = 'StaleResourceApplyError'; }
+}
+
 export function parseWeaponDefinition(source: string, sourcePath: string): WeaponModel {
-  const xml = new SourceDocument(source); const model = xml.descendants('model')[0];
+  const xml = new SourceDocument(source);
+  if (xml.root?.name !== 'weapon') throw new Error(`${sourcePath} 的根元素不是 <weapon>`);
+  if (xml.structuralErrors.length) throw new Error(`${sourcePath} 结构问题：${xml.structuralErrors[0]}`);
+  const model = xml.descendants('model')[0];
   const filename = model ? xml.value(model, 'filename') : undefined;
   const mesh = model ? xml.value(model, 'mesh_filename') ?? (filename?.toLowerCase().endsWith('.mesh') ? filename : undefined) : undefined;
   const voxelModel = filename?.toLowerCase().endsWith('.xml') ? filename : undefined;
@@ -26,6 +34,7 @@ export class ResourceCatalog {
   private weaponCache = new Map<string, ResourceResult<WeaponModel>>();
   private scans: Record<ResourceKind, ResourceFolderScan> = { model: EMPTY_SCAN(), texture: EMPTY_SCAN(), weapon: EMPTY_SCAN() };
   private scanned = false;
+  private applyGeneration = 0;
 
   /** Non-fatal diagnostics from the last folder scan, aggregated across the three kinds. */
   get scanDiagnostics(): { duplicates: string[]; warnings: string[] } {
@@ -44,16 +53,20 @@ export class ResourceCatalog {
   }
   /** Scan all three folders first, then commit atomically; a failed scan leaves the catalog untouched. Unchanged paths are reused (RV-014). */
   async applyFolders(folders: FolderSettings, force = false): Promise<void> {
+    const generation = ++this.applyGeneration;
+    const stale = () => generation !== this.applyGeneration;
     const indexes: Record<ResourceKind, Record<string, string>> = { model: {}, texture: {}, weapon: {} };
     const scans: Record<ResourceKind, ResourceFolderScan> = { model: EMPTY_SCAN(), texture: EMPTY_SCAN(), weapon: EMPTY_SCAN() };
     let changed = false;
     for (const kind of ['model', 'texture', 'weapon'] as ResourceKind[]) {
       if (!force && this.scanned && folders[kind] === this.folders[kind]) { indexes[kind] = this.indexes[kind]; scans[kind] = this.scans[kind]; continue; }
       const scan = folders[kind] ? await desktop.scanFolder(folders[kind], kind) : EMPTY_SCAN();
+      if (stale()) throw new StaleResourceApplyError();
       indexes[kind] = scan.index;
       scans[kind] = scan;
       changed = true;
     }
+    if (stale()) throw new StaleResourceApplyError();
     this.folders = { ...folders };
     this.indexes = indexes;
     this.scans = scans;

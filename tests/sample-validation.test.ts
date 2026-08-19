@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SourceDocument } from '../src/core/xml/source-document';
-import { characterSlotHidden, characterSlotPose, editableBasisRotation, rotateY, sceneEntries, tireVisualPosition, turretWorldPose } from '../src/core/vehicle/vehicle-model';
+import { characterSlotHidden, characterSlotPose, dragNeedsRebuild, editableBasisRotation, rotateY, sceneEntries, tireVisualPosition, turretWorldPose } from '../src/core/vehicle/vehicle-model';
 import { composeVehicle, vehicleBaseReference } from '../src/core/vehicle/vehicle-composition';
 import { parseOgreMesh } from '../src/core/ogre/mesh-reader';
 import { SoldierAssets, SOLDIER_GAME_SCALE, rwrLinearToDisplay } from '../src/core/soldier/soldier-assets';
@@ -220,5 +220,41 @@ describe('局部坐标编辑基准（RV-003）', () => {
     expect(local[0]).toBeCloseTo(0);
     expect(local[1]).toBeCloseTo(0);
     expect(local[2]).toBeCloseTo(1);
+  });
+});
+
+describe('增量拖拽重建判定（R3-002）', () => {
+  it('turret offset 必须全量重建，普通 visual 与独立乘员可继续增量更新', () => {
+    const doc = new SourceDocument('<vehicle><turret offset="0 0 0"/><visual offset="0 0 0"/><character_slot seat_position="0 0 0"/></vehicle>');
+    const turret = doc.root!.children.find((n) => n.name === 'turret')!;
+    const visual = doc.root!.children.find((n) => n.name === 'visual')!;
+    const slot = doc.root!.children.find((n) => n.name === 'character_slot')!;
+    expect(dragNeedsRebuild(turret)).toBe(true);
+    expect(dragNeedsRebuild(visual)).toBe(false);
+    expect(dragNeedsRebuild(slot)).toBe(false);
+  });
+
+  it('移动父炮塔后，子炮塔 / turret visual / attached 乘员的世界坐标必须同步变化', () => {
+    const original = new SourceDocument('<vehicle><turret offset="0 0 0"/><turret parent_turret_index="0" offset="1 0 0"/><visual class="turret" turret_index="0" offset="0 0 0"/><character_slot attached_on_turret="0" seat_position="0 1 0"/></vehicle>');
+    const moved = new SourceDocument('<vehicle><turret offset="2 0 0"/><turret parent_turret_index="0" offset="1 0 0"/><visual class="turret" turret_index="0" offset="0 0 0"/><character_slot attached_on_turret="0" seat_position="0 1 0"/></vehicle>');
+    const originalTurrets = original.root!.children.filter((n) => n.name === 'turret');
+    const movedTurrets = moved.root!.children.filter((n) => n.name === 'turret');
+    const originalVisual = original.descendants('visual')[0];
+    const movedVisual = moved.descendants('visual')[0];
+    const originalSlot = original.descendants('character_slot')[0];
+    const movedSlot = moved.descendants('character_slot')[0];
+
+    const childPose = turretWorldPose(original, originalTurrets, 1)!;
+    const movedChildPose = turretWorldPose(moved, movedTurrets, 1)!;
+    expect(movedChildPose.position[0]).toBeCloseTo(childPose.position[0] + 2);
+
+    const visualBasis = editableBasisRotation(original, originalVisual);
+    const movedVisualBasis = editableBasisRotation(moved, movedVisual);
+    expect(movedVisualBasis).toBeCloseTo(visualBasis);
+
+    const slotPose = characterSlotPose(original, originalSlot, originalTurrets);
+    const movedSlotPose = characterSlotPose(moved, movedSlot, movedTurrets);
+    expect(movedSlotPose.position[0]).toBeCloseTo(slotPose.position[0] + 2);
+    expect(movedSlotPose.position[1]).toBeCloseTo(slotPose.position[1]);
   });
 });

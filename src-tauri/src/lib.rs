@@ -63,7 +63,12 @@ async fn open_vehicle(app: AppHandle, state: State<'_, AppState>) -> Result<Opti
 fn resolve_vehicle_base(path: String, reference: String) -> Result<Option<OpenedFile>, String> {
     let current = PathBuf::from(path);
     let Some(parent) = current.parent() else { return Ok(None) };
-    let candidate = parent.join(reference);
+    // RWR base references are logical paths; normalize both / and \\ so
+    // Windows-authored references also resolve on Linux/macOS (R3-026).
+    let mut candidate = parent.to_path_buf();
+    for component in reference.trim().split(|c| c == '/' || c == '\\').filter(|part| !part.is_empty()) {
+        candidate.push(component);
+    }
     if !candidate.is_file() { return Ok(None) }
     Ok(Some(read_vehicle_file(candidate)?))
 }
@@ -240,7 +245,7 @@ fn scan_resource_folder(path: String, kind: String) -> Result<ResourceFolderScan
     let mut index = HashMap::new();
     let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
     let mut warnings = Vec::new();
-    for entry in WalkDir::new(root).follow_links(false) {
+    for entry in WalkDir::new(root).sort_by_file_name().follow_links(false) {
         let entry = match entry { Ok(value) => value, Err(e) => { warnings.push(format!("资源扫描跳过：{e}")); continue } };
         if !entry.file_type().is_file() { continue }
         let p = entry.path();
@@ -306,10 +311,20 @@ async fn save_vehicle(app: AppHandle, state: State<'_, AppState>, path: String, 
 }
 
 #[tauri::command]
-fn save_weapon(path: String, text: String) -> Result<SavedFile, String> {
+fn save_weapon(path: String, text: String, allowed_roots: Vec<String>) -> Result<SavedFile, String> {
     let target = PathBuf::from(path).canonicalize().map_err(|e| format!("无法确认武器保存路径：{e}"))?;
     if !target.is_file() || !target.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("weapon")) {
         return Err("拒绝保存：目标不是现有的 .weapon 文件".into())
+    }
+    // RV-041: weapon save boundary should be as strict as vehicle save. The frontend
+    // passes the configured weapon folder plus override files; anything outside is rejected.
+    let permitted = allowed_roots.iter().any(|root| {
+        let root_path = PathBuf::from(root);
+        let Ok(root_canon) = root_path.canonicalize() else { return false };
+        if root_canon.is_file() { target == root_canon } else { target.starts_with(&root_canon) }
+    });
+    if !permitted {
+        return Err("拒绝保存：该武器路径不在当前资源配置的允许范围内".into())
     }
     let backup = write_backup(&target)?;
     atomic_write(&target, text.as_bytes())?;
@@ -373,6 +388,19 @@ mod tests {
         assert!(attributes["visual"].contains("class"));
         assert!(attributes["part"].contains("texture_filename"));
         assert!(attributes["turret"].contains("weapon_key"));
+    }
+
+    #[test]
+    fn resolve_base_normalizes_windows_separators() {
+        let unique = format!("rwrstudio-base-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let dir = std::env::temp_dir().join(&unique);
+        fs::create_dir_all(dir.join("subdir")).unwrap();
+        fs::write(dir.join("subdir").join("base.vehicle"), "<vehicle/>").unwrap();
+        let leaf = dir.join("leaf.vehicle");
+        fs::write(&leaf, r#"<vehicle file="subdir\base.vehicle"/>"#).unwrap();
+        let resolved = resolve_vehicle_base(display(&leaf), r"subdir\base.vehicle".to_string()).expect("base should resolve").expect("base file should exist");
+        assert!(resolved.path.ends_with("base.vehicle"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -447,7 +475,7 @@ mod tests {
         let unique = format!("rwrstudio-weapon-save-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
         let path = std::env::temp_dir().join(format!("{unique}.weapon")); let backup = PathBuf::from(format!("{}.bak", display(&path)));
         fs::write(&path, "<weapon><shield offset=\"0 0 0\" extent=\"1 1 1\"/></weapon>").unwrap();
-        let saved = save_weapon(display(&path), "<weapon><shield offset=\"1 2 3\" extent=\"4 5 6\"/></weapon>".into()).unwrap();
+        let saved = save_weapon(display(&path), "<weapon><shield offset=\"1 2 3\" extent=\"4 5 6\"/></weapon>".into(), vec![display(&path)]).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "<weapon><shield offset=\"1 2 3\" extent=\"4 5 6\"/></weapon>");
         assert!(fs::read_to_string(&backup).unwrap().contains("offset=\"0 0 0\"")); assert!(saved.backup_path.as_deref().is_some_and(|value| value.ends_with(".weapon.bak")));
         let _ = fs::remove_file(path); let _ = fs::remove_file(backup);
@@ -458,7 +486,7 @@ mod tests {
         let unique = format!("rwrstudio-rolling-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
         let path = std::env::temp_dir().join(format!("{unique}.weapon"));
         fs::write(&path, "<weapon>v0</weapon>").unwrap();
-        for v in 1..=4 { save_weapon(display(&path), format!("<weapon>v{v}</weapon>")).unwrap(); }
+        for v in 1..=4 { save_weapon(display(&path), format!("<weapon>v{v}</weapon>"), vec![display(&path)]).unwrap(); }
         assert_eq!(fs::read_to_string(&path).unwrap(), "<weapon>v4</weapon>");
         let bak = PathBuf::from(format!("{}.bak", display(&path)));
         let bak1 = PathBuf::from(format!("{}.bak1", display(&path)));
@@ -477,12 +505,14 @@ mod tests {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
                 let _ = window.set_focus();
             }
         }))
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![open_vehicle, open_vehicle_path, resolve_vehicle_base, choose_vehicle_base, choose_vehicle_workspace, scan_vehicle_workspace, scan_vehicle_schema, list_workspace_dir,
