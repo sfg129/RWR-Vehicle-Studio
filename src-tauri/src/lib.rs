@@ -6,7 +6,14 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 use walkdir::WalkDir;
 
 #[derive(Default)]
-struct AppState { writable: Mutex<HashSet<PathBuf>>, writable_weapons: Mutex<HashSet<PathBuf>> }
+struct AppState {
+    writable: Mutex<HashSet<PathBuf>>,
+    writable_weapons: Mutex<HashSet<PathBuf>>,
+    readable: Mutex<HashSet<PathBuf>>,
+    schema_cache: Mutex<HashMap<PathBuf, SchemaCacheEntry>>,
+}
+
+struct SchemaCacheEntry { fingerprint: u64, schema: VehicleSchema }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,7 +36,7 @@ struct VehicleWorkspaceEntry {
 #[derive(Serialize)]
 struct VehicleWorkspace { root: String, entries: Vec<VehicleWorkspaceEntry> }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct VehicleSchema { object_types: Vec<String>, attributes: BTreeMap<String, Vec<String>>, skipped: Vec<String> }
 
@@ -98,6 +105,7 @@ fn open_vehicle_path(path: String, state: State<'_, AppState>) -> Result<OpenedF
 fn read_opened_vehicle(path: PathBuf, state: &AppState) -> Result<OpenedFile, String> {
     let opened = read_vehicle_file(path)?;
     let canonical = PathBuf::from(&opened.path).canonicalize().map_err(|e| format!("无法确认文件路径：{e}"))?;
+    mark_readable(state, &canonical);
     state.writable.lock().map_err(|_| "文件权限状态不可用")?.insert(canonical);
     Ok(opened)
 }
@@ -109,6 +117,18 @@ fn read_vehicle_file(path: PathBuf) -> Result<OpenedFile, String> {
     Ok(OpenedFile { name: file_name(&path), path: display(&path), text })
 }
 
+fn mark_readable(state: &AppState, path: &Path) {
+    if let Ok(canonical) = path.canonicalize() {
+        if let Ok(mut readable) = state.readable.lock() { readable.insert(canonical); }
+    }
+}
+
+fn is_readable(state: &AppState, path: &Path) -> bool {
+    let Ok(canonical) = path.canonicalize() else { return false };
+    let Ok(readable) = state.readable.lock() else { return false };
+    readable.iter().any(|root| canonical == *root || canonical.starts_with(root))
+}
+
 #[tauri::command]
 async fn choose_vehicle_workspace(app: AppHandle) -> Result<Option<VehicleWorkspace>, String> {
     let (tx, mut rx) = tauri::async_runtime::channel(1);
@@ -118,14 +138,56 @@ async fn choose_vehicle_workspace(app: AppHandle) -> Result<Option<VehicleWorksp
     Ok(Some(build_vehicle_workspace(local_path(picked)?)?))
 }
 
-#[tauri::command]
-fn scan_vehicle_workspace(path: String) -> Result<VehicleWorkspace, String> {
+fn scan_vehicle_workspace_impl(path: String) -> Result<VehicleWorkspace, String> {
     build_vehicle_workspace(PathBuf::from(path))
 }
 
 #[tauri::command]
-fn scan_vehicle_schema(path: String) -> Result<VehicleSchema, String> {
-    let root = PathBuf::from(path);
+fn scan_vehicle_workspace(path: String, state: State<'_, AppState>) -> Result<VehicleWorkspace, String> {
+    mark_readable(&state, Path::new(&path));
+    scan_vehicle_workspace_impl(path)
+}
+
+fn schema_fingerprint(root: &Path) -> Result<u64, String> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for entry in WalkDir::new(root).max_depth(13).follow_links(false).into_iter() {
+        let entry = match entry { Ok(value) => value, Err(_) => continue };
+        if !entry.file_type().is_file() || !entry.path().extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("vehicle")) { continue }
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else { continue };
+        path.hash(&mut hasher);
+        meta.len().hash(&mut hasher);
+        let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or_default();
+        modified.hash(&mut hasher);
+    }
+    Ok(hasher.finish())
+}
+
+fn scan_vehicle_schema_impl(path: String, state: &AppState, force: bool) -> Result<VehicleSchema, String> {
+    let root = PathBuf::from(path).canonicalize().map_err(|e| format!("无法确认工作区路径：{e}"))?;
+    if !root.is_dir() { return Err("载具工作区路径不是文件夹".into()) }
+    let fingerprint = schema_fingerprint(&root)?;
+    if !force {
+        if let Ok(cache) = state.schema_cache.lock() {
+            if let Some(entry) = cache.get(&root) {
+                if entry.fingerprint == fingerprint { return Ok(entry.schema.clone()) }
+            }
+        }
+    }
+    let schema = scan_vehicle_schema_root(root.clone())?;
+    if let Ok(mut cache) = state.schema_cache.lock() { cache.insert(root, SchemaCacheEntry { fingerprint, schema: schema.clone() }); }
+    Ok(schema)
+}
+
+#[tauri::command]
+fn scan_vehicle_schema(path: String, force: bool, state: State<'_, AppState>) -> Result<VehicleSchema, String> {
+    mark_readable(&state, Path::new(&path));
+    let state_ref = state.inner();
+    scan_vehicle_schema_impl(path, state_ref, force)
+}
+
+fn scan_vehicle_schema_root(root: PathBuf) -> Result<VehicleSchema, String> {
     if !root.is_dir() { return Err("载具工作区路径不是文件夹".into()) }
     let mut object_types = BTreeSet::new();
     let mut attributes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -204,11 +266,16 @@ fn list_dir_entries(path: &Path) -> Result<Vec<VehicleWorkspaceEntry>, String> {
     Ok(result)
 }
 
-#[tauri::command]
-fn list_workspace_dir(path: String) -> Result<Vec<VehicleWorkspaceEntry>, String> {
+fn list_workspace_dir_impl(path: String) -> Result<Vec<VehicleWorkspaceEntry>, String> {
     let dir = PathBuf::from(path).canonicalize().map_err(|e| format!("无法恢复目录：{e}"))?;
     if !dir.is_dir() { return Err("路径不是文件夹".into()) }
     list_dir_entries(&dir)
+}
+
+#[tauri::command]
+fn list_workspace_dir(path: String, state: State<'_, AppState>) -> Result<Vec<VehicleWorkspaceEntry>, String> {
+    mark_readable(&state, Path::new(&path));
+    list_workspace_dir_impl(path)
 }
 
 #[tauri::command]
@@ -232,8 +299,7 @@ async fn choose_support_file(app: AppHandle, kind: String) -> Result<Option<Stri
     Ok(picked.map(local_path).transpose()?.map(|p| display(&p)))
 }
 
-#[tauri::command]
-fn scan_resource_folder(path: String, kind: String) -> Result<ResourceFolderScan, String> {
+fn scan_resource_folder_impl(path: String, kind: String) -> Result<ResourceFolderScan, String> {
     let root = PathBuf::from(path);
     if !root.is_dir() { return Err("所选资源文件夹不存在".into()) }
     let extensions: &[&str] = match kind.as_str() {
@@ -267,8 +333,16 @@ fn scan_resource_folder(path: String, kind: String) -> Result<ResourceFolderScan
 }
 
 #[tauri::command]
-fn read_text_path(path: String) -> Result<String, String> {
-    decode_text(fs::read(&path).map_err(|e| format!("读取文本失败：{e}"))?)
+fn scan_resource_folder(path: String, kind: String, state: State<'_, AppState>) -> Result<ResourceFolderScan, String> {
+    mark_readable(&state, Path::new(&path));
+    scan_resource_folder_impl(path, kind)
+}
+
+#[tauri::command]
+fn read_text_path(path: String, state: State<'_, AppState>) -> Result<String, String> {
+    let p = PathBuf::from(path);
+    if !is_readable(&state, &p) { return Err("拒绝读取：该路径不在当前会话授权范围内".into()) }
+    decode_text(fs::read(&p).map_err(|e| format!("读取文本失败：{e}"))?)
 }
 
 #[tauri::command]
@@ -281,8 +355,10 @@ fn read_builtin_support(kind: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn read_binary_base64(path: String) -> Result<String, String> {
-    let bytes = fs::read(&path).map_err(|e| format!("读取二进制资源失败：{e}"))?;
+fn read_binary_base64(path: String, state: State<'_, AppState>) -> Result<String, String> {
+    let p = PathBuf::from(path);
+    if !is_readable(&state, &p) { return Err("拒绝读取：该路径不在当前会话授权范围内".into()) }
+    let bytes = fs::read(&p).map_err(|e| format!("读取二进制资源失败：{e}"))?;
     Ok(STANDARD.encode(bytes))
 }
 
@@ -412,6 +488,21 @@ mod tests {
     }
 
     #[test]
+    fn schema_cache_returns_fingerprint_hit_without_rescanning() {
+        let unique = format!("rwrstudio-schema-cache-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let dir = std::env::temp_dir().join(&unique);
+        fs::create_dir_all(&dir).unwrap();
+        let root = dir.canonicalize().unwrap();
+        let fingerprint = schema_fingerprint(&root).unwrap();
+        let dummy = VehicleSchema { object_types: vec!["dummy".to_string()], attributes: BTreeMap::new(), skipped: vec![] };
+        let state = AppState::default();
+        state.schema_cache.lock().unwrap().insert(root.clone(), SchemaCacheEntry { fingerprint, schema: dummy });
+        let schema = scan_vehicle_schema_impl(display(&root), &state, false).unwrap();
+        assert_eq!(schema.object_types, vec!["dummy".to_string()]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn schema_scan_skips_undecodable_files() {
         let unique = format!("rwrstudio-schema-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
         let dir = std::env::temp_dir().join(&unique);
@@ -419,7 +510,7 @@ mod tests {
         fs::write(dir.join("good.vehicle"), "<vehicle><turret weapon_key=\"x\"/></vehicle>").unwrap();
         fs::write(dir.join("bad.vehicle"), [0xFFu8, 0xFE, 0x00, 0xFF]).unwrap();
         fs::write(dir.join("note.txt"), "ignored").unwrap();
-        let schema = scan_vehicle_schema(display(&dir)).expect("无法解析的文件应被跳过而非整体失败");
+        let schema = scan_vehicle_schema_impl(display(&dir), &AppState::default(), false).expect("无法解析的文件应被跳过而非整体失败");
         assert!(schema.object_types.contains(&"turret".to_string()));
         assert_eq!(schema.skipped.len(), 1);
         assert!(schema.skipped[0].ends_with("bad.vehicle"));
@@ -435,7 +526,7 @@ mod tests {
         fs::write(dir.join("a/gun.weapon"), "a").unwrap();
         fs::write(dir.join("b/gun.weapon"), "b").unwrap();
         fs::write(dir.join("a/rifle.weapon"), "r").unwrap();
-        let scan = scan_resource_folder(display(&dir), "weapon".into()).unwrap();
+        let scan = scan_resource_folder_impl(display(&dir), "weapon".into()).unwrap();
         assert_eq!(scan.index.len(), 2);
         assert!(scan.index.contains_key("gun.weapon") && scan.index.contains_key("rifle.weapon"));
         assert_eq!(scan.duplicates.len(), 1);
@@ -452,7 +543,7 @@ mod tests {
         // A flat directory with many non-.vehicle files must not fail the (now lazy) workspace listing.
         for i in 0..10_001 { fs::write(dir.join(format!("asset{i}.mesh")), "").unwrap(); }
         fs::write(dir.join("tank.vehicle"), "<vehicle/>").unwrap();
-        let workspace = scan_vehicle_workspace(display(&dir)).expect("非 .vehicle 文件不应让工作区列举失败");
+        let workspace = scan_vehicle_workspace_impl(display(&dir)).expect("非 .vehicle 文件不应让工作区列举失败");
         assert_eq!(workspace.entries.len(), 10_002);
         assert!(workspace.entries.iter().any(|e| e.name == "tank.vehicle" && e.is_vehicle));
         assert!(workspace.entries.iter().all(|e| e.children.is_empty()));
@@ -467,7 +558,7 @@ mod tests {
         fs::write(dir.join("a.vehicle"), "<vehicle/>").unwrap();
         fs::write(dir.join("readme.txt"), "x").unwrap();
         fs::write(dir.join("sub/inner.vehicle"), "<vehicle/>").unwrap();
-        let entries = list_workspace_dir(display(&dir)).expect("应能列举单个目录");
+        let entries = list_workspace_dir_impl(display(&dir)).expect("应能列举单个目录");
         let names = entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>();
         assert_eq!(names, vec!["sub", "a.vehicle", "readme.txt"]);
         assert!(entries.iter().all(|e| e.children.is_empty()));
@@ -535,6 +626,7 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(AppState::default())

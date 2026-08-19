@@ -3,6 +3,8 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { desktop } from '../platform/desktop-api';
 import { parseOgreMesh, type OgreMesh } from '../core/ogre/mesh-reader';
+import { DDSLoader } from 'three/examples/jsm/loaders/DDSLoader.js';
+import { TGALoader } from 'three/examples/jsm/loaders/TGALoader.js';
 import type { SourceDocument, SourceNode } from '../core/xml/source-document';
 import type { ResourceCatalog } from '../core/resources/resource-catalog';
 import { characterSlotHidden, characterSlotPose, dragNeedsRebuild, editableBasisRotation, idleState, localDragValue, rotateY, tireVisualPosition, turretWorldPose, visualMatchesDamageState, WEAPON_LOGICAL_TO_MODEL_YAW } from '../core/vehicle/vehicle-model';
@@ -40,7 +42,7 @@ export class SceneController {
   private fpsFrames = 0; private fpsStarted = performance.now();
 
   constructor(private host: HTMLElement, private onSelect: (id: number) => void, private onMove: (node: SourceNode, attr: string, value: Vec3, needsRebuild: boolean) => void,
-    private onStats: (fps: number, dynamicOccupants: number) => void) {
+    private onStats: (fps: number, dynamicOccupants: number) => void, private onDiagnostic: (message: string) => void = () => {}) {
     this.scene.background = new THREE.Color(0x0d1115); this.scene.fog = new THREE.Fog(0x0d1115, 80, 250);
     this.camera.position.set(16, 11, 18);
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -115,7 +117,7 @@ export class SceneController {
         }
         if (generation !== this.sceneGeneration) return;
         object.position.set(...origin); object.userData.nodeId = visual.id; object.traverse((o) => o.userData.nodeId = visual.id); this.root.add(object); this.pickTargets.push(object); this.nodeObjects.set(visual.id, object);
-      } catch (error) { if (generation === this.sceneGeneration) console.warn(`模型加载失败：${a.mesh_filename}`, error); }
+      } catch (error) { if (generation === this.sceneGeneration) { console.warn(`模型加载失败：${a.mesh_filename}`, error); this.onDiagnostic(`模型加载失败：${a.mesh_filename}`); } }
     });
     await mapLimit(turrets.map((turret, index) => ({ turret, index })), ASSET_CONCURRENCY, ({ turret, index }) => this.addWeapon(turret, index, globalOffset, generation));
     if (options.showBounds && physics) this.addBounds(physics);
@@ -235,7 +237,7 @@ export class SceneController {
       }
       if (!group.children.length) return;
       group.userData.nodeId = turret.id; group.traverse((object) => object.userData.nodeId = turret.id); this.root.add(group); this.pickTargets.push(group); this.nodeObjects.set(turret.id, group);
-    } catch (error) { console.warn(`武器模型加载失败：${weapon.mesh ?? weapon.voxelModel ?? a.weapon_key}`, error); }
+    } catch (error) { console.warn(`武器模型加载失败：${weapon.mesh ?? weapon.voxelModel ?? a.weapon_key}`, error); this.onDiagnostic(`武器模型加载失败：${weapon.mesh ?? weapon.voxelModel ?? a.weapon_key}`); }
   }
 
   private buildVoxelModel(voxels: StaticVoxel[]): THREE.InstancedMesh {
@@ -284,7 +286,7 @@ export class SceneController {
         this.geometryCache.set(cacheKey, geometry); this.sharedAssets.add(geometry);
       }
       const textureName = textures[Math.min(i, textures.length - 1)] || textures[0]; const texturePath = this.catalog.resolve(textureName, 'texture');
-      let map: THREE.Texture | undefined; if (texturePath) try { map = await this.loadTexture(texturePath); if (generation !== this.sceneGeneration) return group; } catch { /* fallback material */ }
+      let map: THREE.Texture | undefined; if (texturePath) try { map = await this.loadTexture(texturePath); if (generation !== this.sceneGeneration) return group; } catch (error) { if (generation === this.sceneGeneration) this.onDiagnostic(`纹理加载失败：${texturePath}`); }
       const material = new THREE.MeshStandardMaterial({ map, color: map ? 0xffffff : colorFromName(sub.materialName), roughness: 0.78, metalness: 0.08, side: THREE.DoubleSide });
       const part = new THREE.Mesh(geometry, material); part.castShadow = false; part.receiveShadow = false; part.name = sub.name; group.add(part);
     }
@@ -299,6 +301,20 @@ export class SceneController {
   private loadVoxels(path: string): Promise<StaticVoxel[]> { return this.loadCached(this.voxelCache, path, () => desktop.readText(path).then(parseStaticVoxelModel)); }
   private loadTexture(path: string): Promise<THREE.Texture> {
     const ext = path.split('.').at(-1)?.toLowerCase();
+    if (ext === 'dds') return this.loadCached(this.textureCache, path, () => desktop.readBinary(path).then((buffer) => new Promise<THREE.Texture>((resolve, reject) => {
+      const url = URL.createObjectURL(new Blob([buffer]));
+      new DDSLoader().load(url, (texture) => {
+        URL.revokeObjectURL(url); texture.colorSpace = THREE.SRGBColorSpace; texture.needsUpdate = true;
+        this.resolvedTextures.add(texture); this.resolvedTexturePaths.set(texture, path); resolve(texture);
+      }, undefined, (e) => { URL.revokeObjectURL(url); reject(e); });
+    })));
+    if (ext === 'tga') return this.loadCached(this.textureCache, path, () => desktop.readBinary(path).then((buffer) => new Promise<THREE.Texture>((resolve, reject) => {
+      const url = URL.createObjectURL(new Blob([buffer]));
+      new TGALoader().load(url, (texture) => {
+        URL.revokeObjectURL(url); texture.colorSpace = THREE.SRGBColorSpace; texture.flipY = false; texture.needsUpdate = true;
+        this.resolvedTextures.add(texture); this.resolvedTexturePaths.set(texture, path); resolve(texture);
+      }, undefined, (e) => { URL.revokeObjectURL(url); reject(e); });
+    })));
     if (!['png', 'jpg', 'jpeg', 'bmp'].includes(ext ?? '')) return Promise.reject(new Error(`暂不支持浏览器纹理格式 ${ext ?? '未知'}`));
     return this.loadCached(this.textureCache, path, () => desktop.readBinary(path).then((buffer) => new Promise<THREE.Texture>((resolve, reject) => {
       const url = URL.createObjectURL(new Blob([buffer]));

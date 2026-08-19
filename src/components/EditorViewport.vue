@@ -6,7 +6,7 @@ import type { ResourceCatalog } from '../core/resources/resource-catalog';
 import type { SoldierAssets } from '../core/soldier/soldier-assets';
 
 const props = defineProps<{ document?: SourceDocument; catalog: ResourceCatalog; soldier?: SoldierAssets; options: ViewOptions; selectedId?: number; revision: number; vehicleKey?: string; resourceGeneration?: number; editingEnabled?: boolean }>();
-const emit = defineEmits<{ select: [number]; move: [SourceNode, string, [number, number, number], boolean] }>();
+const emit = defineEmits<{ select: [number]; move: [SourceNode, string, [number, number, number], boolean]; diagnostic: [string] }>();
 const host = ref<HTMLElement>(); const fps = ref(0); const dynamicOccupants = ref(0); const fading = ref(false);
 let controller: SceneController | undefined; let lastVehicleKey: string | undefined;
 onMounted(() => { controller = new SceneController(host.value!, (id) => emit('select', id), (node, attr, value, needsRebuild) => emit('move', node, attr, value, needsRebuild),

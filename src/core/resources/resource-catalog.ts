@@ -120,17 +120,9 @@ export class ResourceCatalog {
     const missing = new Set<string>();
     for (const node of document.descendants('visual')) {
       const a = document.attrs(node); if (a.mesh_filename && !this.resolve(a.mesh_filename, 'model')) missing.add(`模型：${a.mesh_filename}`);
-      if (a.texture_filename) {
-        const texturePath = this.resolve(a.texture_filename, 'texture');
-        if (!texturePath) missing.add(`纹理：${a.texture_filename}`);
-        else if (isUnsupportedPreviewTexture(texturePath)) missing.add(`纹理：${a.texture_filename}（已找到，但预览不支持 DDS/TGA）`);
-      }
+      if (a.texture_filename && !this.resolve(a.texture_filename, 'texture')) missing.add(`纹理：${a.texture_filename}`);
       for (const part of node.children.filter((n) => n.name === 'part')) {
-        const texture = document.value(part, 'texture_filename');
-        if (!texture) continue;
-        const texturePath = this.resolve(texture, 'texture');
-        if (!texturePath) missing.add(`纹理：${texture}`);
-        else if (isUnsupportedPreviewTexture(texturePath)) missing.add(`纹理：${texture}（已找到，但预览不支持 DDS/TGA）`);
+        const texture = document.value(part, 'texture_filename'); if (texture && !this.resolve(texture, 'texture')) missing.add(`纹理：${texture}`);
       }
     }
     for (const node of document.descendants('turret')) {
@@ -149,6 +141,5 @@ export class ResourceCatalog {
   }
 }
 function fail(kind: ResourceFailureKind, message: string): { ok: false; kind: ResourceFailureKind; message: string } { return { ok: false, kind, message }; }
-function isUnsupportedPreviewTexture(path: string): boolean { const ext = path.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase(); return ext === 'dds' || ext === 'tga'; }
 function describe(e: unknown): string { return e instanceof Error ? e.message : String(e); }
 function fileName(path: string): string { return path.replaceAll('\\', '/').split('/').at(-1) ?? path; }

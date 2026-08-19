@@ -6,6 +6,7 @@ import OverrideDialog from './components/OverrideDialog.vue';
 import { desktop, type OpenedFile, type VehicleSchema, type VehicleWorkspace, type VehicleWorkspaceEntry } from './platform/desktop-api';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog';
+import { exit } from '@tauri-apps/plugin-process';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { SourceDocument, type SourceNode } from './core/xml/source-document';
 import { ResourceCatalog, StaleResourceApplyError } from './core/resources/resource-catalog';
@@ -34,7 +35,7 @@ const baseReference = ref(''); const baseOpened = ref<OpenedFile>(); const baseD
 const savedText = ref(''); const undoStack = ref<string[]>([]);
 catalog.folders = { ...rememberedSelection.folders };
 const entries = ref<SceneEntry[]>([]); const selectedId = ref<number>(); const { documentRevision, sceneRevision, markDocumentChanged, markSceneChanged } = createEditorRevisions(); const resourceGeneration = ref(0); const status = ref('请选择 .vehicle 文件');
-const missing = ref<string[]>([]); const resourceDialog = ref(false); const overrideDialog = ref(false); const soldier = ref<SoldierAssets>();
+const missing = ref<string[]>([]); const sceneDiagnostics = ref<string[]>([]); const resourceDialog = ref(false); const overrideDialog = ref(false); const soldier = ref<SoldierAssets>();
 const supportModel = ref(rememberedSelection.supportModel || BUILTIN_SUPPORT_MODEL);
 const supportAnimations = ref(rememberedSelection.supportAnimations || BUILTIN_SUPPORT_ANIMATIONS);
 const options = reactive({ showBroken: false, showOccupants: true, showBounds: true, showShields: false, animate: true });
@@ -354,12 +355,19 @@ const RESOURCE_ATTRS = new Set(['mesh_filename', 'texture_filename', 'weapon_key
 const VEC3_ATTRS = new Set(['offset', 'position', 'extent', 'visual_offset', 'collision_model_pos', 'collision_model_extent', 'seat_position', 'enter_position', 'weapon_offset']);
 const NUMBER_ATTRS = new Set(['rotation', 'mass', 'speed', 'radius', 'turn_speed']);
 const INTEGER_ATTRS = new Set(['turret_index', 'parent_turret_index', 'attached_on_turret', 'animation_id']);
+const ATTR_DEFAULTS: Record<string, string> = {
+  file: '', offset: '0 0 0', position: '0 0 0', extent: '1 1 1', visual_offset: '0 0 0',
+  collision_model_pos: '0 0 0', collision_model_extent: '1 1 1', seat_position: '0 0 0', enter_position: '0 0 0', weapon_offset: '0 0 0',
+  rotation: '0', mass: '0', speed: '0', radius: '0', turn_speed: '0', turret_index: '0', parent_turret_index: '0', attached_on_turret: '0', animation_id: '0',
+};
 let validateTimer: number | undefined;
 function scheduleValidate() {
   if (validateTimer !== undefined) window.clearTimeout(validateTimer);
   validateTimer = window.setTimeout(() => { void validate(); }, 300);
 }
 function select(id: number) { selectedId.value = id; }
+function pushSceneDiagnostic(message: string) { sceneDiagnostics.value = [...sceneDiagnostics.value.slice(-19), message]; }
+function clearSceneDiagnostics() { sceneDiagnostics.value = []; }
 function recordUndo() { lastEditedDoc.value = 'vehicle'; if (!document.value) return; const snapshot = document.value.serialize(); if (undoStack.value.at(-1) !== snapshot) undoStack.value = [...undoStack.value.slice(-99), snapshot]; }
 function recordWeaponUndo(session: WeaponSession) {
   lastEditedDoc.value = session.path; const snapshot = session.document.serialize();
@@ -418,14 +426,14 @@ function addSelectedAttribute() {
   if (saving.value) { status.value = '保存中，已忽略本次编辑'; return; }
   if (!document.value || !selected.value || !newAttribute.value) return; const sourceNode = composition?.editableNode(selected.value.node);
   if (!sourceNode) { status.value = '继承自基础载具的对象不能在覆盖文件中增加属性'; return; }
-  recordUndo(); const name = newAttribute.value; document.value.addAttribute(sourceNode, name, '0'); markDocumentChanged(); rebuildPreview(); newAttribute.value = ''; status.value = `已加入属性 ${name}`; if (RESOURCE_ATTRS.has(name)) scheduleValidate();
+  recordUndo(); const name = newAttribute.value; document.value.addAttribute(sourceNode, name, ATTR_DEFAULTS[name] ?? '0'); markDocumentChanged(); rebuildPreview(); newAttribute.value = ''; status.value = `已加入属性 ${name}`; if (RESOURCE_ATTRS.has(name)) scheduleValidate();
 }
 async function addRootAttribute() {
   if (saving.value) { status.value = '保存中，已忽略本次编辑'; return; }
   if (!document.value?.root || !newRootAttribute.value) return;
   const name = newRootAttribute.value;
   recordUndo();
-  document.value.addAttribute(document.value.root, name, name === 'file' ? '' : '0'); markDocumentChanged(); newRootAttribute.value = '';
+  document.value.addAttribute(document.value.root, name, name === 'file' ? '' : ATTR_DEFAULTS[name] ?? '0'); markDocumentChanged(); newRootAttribute.value = '';
   if (name === 'file') {
     await resolveAutomaticBase(); rebuildPreview(false); scheduleValidate();
     status.value = baseError.value ? `基础载具解析失败：${baseError.value}` : '已加入基础载具引用（file 为空，请填写文件名）';
@@ -502,20 +510,32 @@ function keydown(event: KeyboardEvent) {
 }
 watch(selectedWeaponKey, () => { void loadSelectedWeaponEditor(); });
 let unlistenClose: UnlistenFn | undefined;
+let exiting = false;
 onMounted(async () => {
   window.addEventListener('keydown', keydown);
   // RV-043 / R4-016: Tauri native close-request is the only desktop close guard.
   try {
     const appWindow = getCurrentWindow();
     unlistenClose = await appWindow.onCloseRequested(async (event) => {
-      if (!anyDirty.value) return;
-      const confirmed = await tauriConfirm('有未保存修改，仍要关闭吗？', {
-        title: 'RWR Vehicle Studio',
-        kind: 'warning',
-        okLabel: '仍然关闭',
-        cancelLabel: '取消',
-      });
-      if (!confirmed) event.preventDefault();
+      // Windows 当前默认 window-close 链无法可靠完成。closeRequested 只作为退出请求入口。
+      event.preventDefault();
+      if (exiting) return;
+      if (anyDirty.value) {
+        const confirmed = await tauriConfirm('有未保存修改，仍要退出吗？', {
+          title: 'RWR Vehicle Studio',
+          kind: 'warning',
+          okLabel: '退出',
+          cancelLabel: '取消',
+        });
+        if (!confirmed) return;
+      }
+      exiting = true;
+      try {
+        await exit(0);
+      } catch (error) {
+        exiting = false;
+        status.value = `退出应用失败：${message(error)}`;
+      }
     });
   } catch { /* 纯浏览器 / 非 Tauri runtime 时没有原生 close guard */ }
   await restoreVehicleWorkspace(); nextTick();
@@ -594,10 +614,11 @@ onBeforeUnmount(() => {
           </Transition>
         </div>
         <div v-if="missing.length" class="missing-box"><strong>未解析资源 {{ missing.length }}</strong><span class="ellipsis" v-for="item in missing.slice(0, 12)" :key="item">{{ item }}</span><button @click="overrideDialog = true">指定单文件覆盖</button></div>
+        <div v-if="sceneDiagnostics.length" class="missing-box"><strong>场景诊断 {{ sceneDiagnostics.length }}</strong><span class="ellipsis" v-for="item in sceneDiagnostics" :key="item">{{ item }}</span><button @click="clearSceneDiagnostics">清空</button></div>
       </aside>
 
       <section class="viewport-panel">
-        <EditorViewport :document="previewDocument" :catalog="catalog" :soldier="soldier" :options="options" :selected-id="selectedId" :revision="sceneRevision" :vehicle-key="opened?.path" :resource-generation="resourceGeneration" :editing-enabled="!saving" @select="select" @move="move" />
+        <EditorViewport :document="previewDocument" :catalog="catalog" :soldier="soldier" :options="options" :selected-id="selectedId" :revision="sceneRevision" :vehicle-key="opened?.path" :resource-generation="resourceGeneration" :editing-enabled="!saving" @select="select" @move="move" @diagnostic="pushSceneDiagnostic" />
         <div v-if="!document" class="viewport-empty"><b>NO VEHICLE LOADED</b><span>读取 .vehicle、OGRE .mesh 与引用纹理，在游戏外直接校准数字。</span><button class="primary" @click="openVehicle">选择载具文件</button></div>
         <div class="quick-options">
           <label><input v-model="options.showBounds" type="checkbox" /> 碰撞框</label><label><input v-model="options.showShields" type="checkbox" /> 显示护盾范围</label><label><input v-model="options.showOccupants" type="checkbox" /> 乘员</label><label><input v-model="options.animate" type="checkbox" /> 动画</label><label><input v-model="options.showBroken" type="checkbox" /> 损毁外观</label>

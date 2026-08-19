@@ -16,7 +16,7 @@ export const desktop = {
   chooseVehicleWorkspace: () => invoke<VehicleWorkspace | null>('choose_vehicle_workspace'),
   scanVehicleWorkspace: (path: string) => invoke<VehicleWorkspace>('scan_vehicle_workspace', { path }),
   listWorkspaceDir: (path: string) => invoke<VehicleWorkspaceEntry[]>('list_workspace_dir', { path }),
-  scanVehicleSchema: (path: string) => invoke<VehicleSchema>('scan_vehicle_schema', { path }),
+  scanVehicleSchema: (path: string, force = false) => invoke<VehicleSchema>('scan_vehicle_schema', { path, force }),
   chooseFolder: () => invoke<string | null>('choose_folder'),
   chooseOverrideFile: () => invoke<string | null>('choose_override_file'),
   chooseSupportFile: (kind: 'model' | 'animation') => invoke<string | null>('choose_support_file', { kind }),
