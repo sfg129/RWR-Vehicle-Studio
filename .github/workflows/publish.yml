@@ -90,13 +90,19 @@ jobs:
           path: release-artifacts
 
       - name: publish rolling nightly release
-        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: nightly
-          name: 'RWR Vehicle Studio (nightly)'
-          body: 'Rolling build from the latest commit on main. Assets are rebuilt and replaced on every push.'
-          draft: false
-          prerelease: true
-          files: release-artifacts/**/*
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find release-artifacts -type f -print | sort)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No artifacts found" >&2
+            exit 1
+          fi
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release upload nightly "${assets[@]}" --clobber
+          else
+            gh release create nightly "${assets[@]}" --prerelease \
+              --title "RWR Vehicle Studio (nightly)" \
+              --notes "Rolling build from the latest commit on main. Assets are rebuilt and replaced on every push."
+          fi

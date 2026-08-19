@@ -25,7 +25,8 @@ describe('nightly publish workflow（R3-019/020/021/022/023 / R4-007）', () => 
     expect(publish).toContain('needs: build-tauri');
     expect(publish).toContain('actions/upload-artifact@v4');
     expect(publish).toContain('actions/download-artifact@v4');
-    expect(publish).toContain('softprops/action-gh-release@v2');
+    expect(publish).toContain('gh release upload nightly');
+    expect(publish).toContain('--clobber');
     // tag retarget 只能出现在 finalize job 之后
     expect(publish.indexOf('git tag -f nightly "$HEAD_SHA"')).toBeGreaterThan(finalize);
     expect(publish.indexOf('git push -f origin "refs/tags/nightly"')).toBeGreaterThan(finalize);
