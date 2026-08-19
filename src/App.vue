@@ -592,12 +592,17 @@ onMounted(async () => {
       event.preventDefault();
       if (exiting) return;
       if (anyDirty.value) {
-        const confirmed = await tauriConfirm('有未保存修改，仍要退出吗？', {
-          title: 'RWR Vehicle Studio',
-          kind: 'warning',
-          okLabel: '退出',
-          cancelLabel: '取消',
-        });
+        let confirmed = false;
+        try {
+          confirmed = await tauriConfirm('有未保存修改，仍要退出吗？', {
+            title: 'RWR Vehicle Studio',
+            kind: 'warning',
+            okLabel: '退出',
+            cancelLabel: '取消',
+          });
+        } catch {
+          confirmed = window.confirm('有未保存修改，仍要退出吗？');
+        }
         if (!confirmed) return;
         captureRecoverySnapshot();
       }

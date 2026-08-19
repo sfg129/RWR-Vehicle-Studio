@@ -10,7 +10,7 @@ const emit = defineEmits<{ select: [number]; move: [SourceNode, string, [number,
 const host = ref<HTMLElement>(); const fps = ref(0); const dynamicOccupants = ref(0); const fading = ref(false);
 let controller: SceneController | undefined; let lastVehicleKey: string | undefined;
 onMounted(() => { controller = new SceneController(host.value!, (id) => emit('select', id), (node, attr, value, needsRebuild) => emit('move', node, attr, value, needsRebuild),
-  (value, dynamic) => { fps.value = value; dynamicOccupants.value = dynamic; }); refresh(); });
+  (value, dynamic) => { fps.value = value; dynamicOccupants.value = dynamic; }, (message) => emit('diagnostic', message)); refresh(); });
 onBeforeUnmount(() => { controller?.dispose(); controller = undefined; });
 async function refresh() {
   if (!controller || !props.document) return;

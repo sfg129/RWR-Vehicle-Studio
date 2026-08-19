@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { readFile, readTextFile } from '@tauri-apps/plugin-fs';
 
 export interface OpenedFile { name: string; path: string; text: string }
 export interface SavedFile { name: string; path: string; backupPath?: string }
@@ -22,13 +23,10 @@ export const desktop = {
   chooseSupportFile: (kind: 'model' | 'animation') => invoke<string | null>('choose_support_file', { kind }),
   readBuiltinSupport: (kind: 'model' | 'animation') => invoke<string>('read_builtin_support', { kind }),
   scanFolder: (path: string, kind: ResourceKind) => invoke<ResourceFolderScan>('scan_resource_folder', { path, kind }),
-  readText: (path: string) => invoke<string>('read_text_path', { path }),
+  readText: (path: string) => readTextFile(path),
   readBinary: async (path: string): Promise<ArrayBuffer> => {
-    const base64 = await invoke<string>('read_binary_base64', { path });
-    const raw = atob(base64);
-    const bytes = new Uint8Array(raw.length);
-    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-    return bytes.buffer;
+    const bytes = await readFile(path);
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
   },
   saveVehicle: (path: string, text: string, saveAs = false) =>
     invoke<SavedFile | null>('save_vehicle', { path, text, saveAs }),
