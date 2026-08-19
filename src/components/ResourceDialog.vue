@@ -23,7 +23,7 @@ const presetName = ref(presets.value.find((preset) => preset.id === selectedPres
 const folders = reactive({ ...props.catalog.folders });
 const model = ref(props.supportModel || BUILTIN_SUPPORT_MODEL);
 const animations = ref(props.supportAnimations || BUILTIN_SUPPORT_ANIMATIONS);
-const busy = ref(''); const indexing = ref(false); let applyToken = 0;
+const busy = ref(''); const indexing = ref(false); const authorizationMissing = ref<string[]>([]); const needsRootAuthorization = ref(false); let applyToken = 0;
 const selectedPreset = computed(() => presets.value.find((preset) => preset.id === selectedPresetId.value));
 async function choose(kind: ResourceKind) { const path = await desktop.chooseFolder(); if (path) folders[kind] = path; }
 async function support(kind: 'model' | 'animation') { const path = await desktop.chooseSupportFile(kind); if (path) (kind === 'model' ? model : animations).value = path; }
@@ -50,11 +50,34 @@ function removePreset() {
 }
 function restoreSupport(kind: 'model' | 'animation') { if (kind === 'model') model.value = BUILTIN_SUPPORT_MODEL; else animations.value = BUILTIN_SUPPORT_ANIMATIONS; }
 function supportLabel(path: string, kind: 'model' | 'animation'): string { return isBuiltinSupport(path) ? `内置：${kind === 'model' ? 'Normandy Ranger 人物模型' : 'RWR 人物动画'}` : path; }
+async function authorizeRoot() {
+  const root = await desktop.chooseFolder();
+  if (root) {
+    authorizationMissing.value = [];
+    needsRootAuthorization.value = false;
+    busy.value = '已授权资源根目录，请重新点击“建立索引并载入”。';
+  }
+}
 async function apply() {
   const token = ++applyToken;
+  const selection = cloneResourceSelection(currentSelection());
+
+  const missing: string[] = [];
+  for (const [kind, path] of Object.entries(selection.folders)) {
+    if (path && !(await desktop.isPathReadable(path))) missing.push(`${kind}: ${path}`);
+  }
+  if (!isBuiltinSupport(selection.supportModel) && !(await desktop.isPathReadable(selection.supportModel))) missing.push(`人物模型：${selection.supportModel}`);
+  if (!isBuiltinSupport(selection.supportAnimations) && !(await desktop.isPathReadable(selection.supportAnimations))) missing.push(`人物动画：${selection.supportAnimations}`);
+  if (missing.length) {
+    authorizationMissing.value = missing;
+    needsRootAuthorization.value = true;
+    return;
+  }
+  authorizationMissing.value = [];
+  needsRootAuthorization.value = false;
+
   indexing.value = true; busy.value = '正在递归建立资源索引…';
   try {
-    const selection = cloneResourceSelection(currentSelection());
     await props.catalog.applyFolders(selection.folders, true);
     if (token !== applyToken) return;
     saveResourcePreferences({ presets: presets.value, activePresetId: selectedPresetId.value, lastSelection: cloneResourceSelection(selection) });
@@ -85,6 +108,11 @@ async function apply() {
     <label class="field-row path-row support-row"><span>乘员模型</span><input :value="supportLabel(model, 'model')" readonly /><button @click="support('model')">更改</button><button :disabled="model === BUILTIN_SUPPORT_MODEL" @click="restoreSupport('model')">恢复默认</button></label>
     <label class="field-row path-row support-row"><span>动画文件</span><input :value="supportLabel(animations, 'animation')" readonly /><button @click="support('animation')">更改</button><button :disabled="animations === BUILTIN_SUPPORT_ANIMATIONS" @click="restoreSupport('animation')">恢复默认</button></label>
     </fieldset>
+    <div v-if="needsRootAuthorization" class="missing-box">
+      <strong>此预设来自旧版本，需要重新授权资源路径。</strong>
+      <span class="ellipsis" v-for="item in authorizationMissing" :key="item">未授权：{{ item }}</span>
+      <button @click="authorizeRoot">重新授权资源根目录</button>
+    </div>
     <footer><span class="muted">{{ busy }}</span><button :disabled="indexing" @click="$emit('close')">取消</button><button class="primary" :disabled="indexing" @click="apply">建立索引并载入</button></footer>
   </section></div>
 </template>

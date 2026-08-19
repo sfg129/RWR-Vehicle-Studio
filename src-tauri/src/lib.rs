@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Serialize;
 use std::{collections::{BTreeMap, BTreeSet, HashMap, HashSet}, fs, path::{Path, PathBuf}, sync::Mutex};
 use tauri::{AppHandle, Manager, State};
@@ -126,15 +127,23 @@ fn read_opened_vehicle(path: PathBuf, state: &AppState) -> Result<OpenedFile, St
     Ok(opened)
 }
 
+fn has_vehicle_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|ext| {
+            ext.eq_ignore_ascii_case("vehicle")
+                || ext.eq_ignore_ascii_case("xml")
+        })
+}
+
+fn is_workspace_vehicle_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("vehicle"))
+}
+
 fn is_vehicle_file(path: &Path) -> bool {
-    path.is_file()
-        && path
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|ext| {
-                ext.eq_ignore_ascii_case("vehicle")
-                    || ext.eq_ignore_ascii_case("xml")
-            })
+    path.is_file() && has_vehicle_extension(path)
 }
 
 fn read_vehicle_file(path: PathBuf) -> Result<OpenedFile, String> {
@@ -187,7 +196,7 @@ fn schema_fingerprint(root: &Path) -> Result<u64, String> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for entry in WalkDir::new(root).max_depth(13).follow_links(false).into_iter() {
         let entry = match entry { Ok(value) => value, Err(_) => continue };
-        if !is_vehicle_file(entry.path()) { continue }
+        if !entry.file_type().is_file() || !is_workspace_vehicle_path(entry.path()) { continue }
         let path = entry.path();
         let Ok(meta) = entry.metadata() else { continue };
         path.hash(&mut hasher);
@@ -227,14 +236,13 @@ fn scan_vehicle_schema_root(root: PathBuf) -> Result<VehicleSchema, String> {
     let mut skipped = Vec::new();
     let mut count = 0usize;
     for entry in WalkDir::new(root).max_depth(13).follow_links(false).into_iter().filter_map(Result::ok) {
-        if !is_vehicle_file(entry.path()) { continue }
+        if !entry.file_type().is_file() || !is_workspace_vehicle_path(entry.path()) { continue }
         count += 1; if count > 10_000 { return Err("载具文件超过 10000 个；请选择更具体的工作区".into()) }
         match fs::read(entry.path()).map_err(|e| e.to_string()).and_then(decode_text) {
             Ok(text) => scan_xml_schema(&text, &mut object_types, &mut attributes),
             Err(_) => skipped.push(display(entry.path())),
         }
     }
-    attributes.remove("vehicle");
     Ok(VehicleSchema {
         object_types: object_types.into_iter().collect(),
         attributes: attributes.into_iter().map(|(name, values)| (name, values.into_iter().collect())).collect(),
@@ -293,7 +301,7 @@ fn list_dir_entries(path: &Path) -> Result<Vec<VehicleWorkspaceEntry>, String> {
         let metadata = match fs::symlink_metadata(&child) { Ok(value) => value, Err(_) => continue };
         if metadata.file_type().is_symlink() { continue }
         let is_directory = metadata.is_dir();
-        let is_vehicle = is_vehicle_file(&child);
+        let is_vehicle = metadata.is_file() && is_workspace_vehicle_path(&child);
         result.push(VehicleWorkspaceEntry { name: file_name(&child), path: display(&child), is_directory, is_vehicle, children: Vec::new() });
     }
     Ok(result)
@@ -381,12 +389,32 @@ fn scan_resource_folder(app: AppHandle, path: String, kind: String) -> Result<Re
 }
 
 #[tauri::command]
+fn is_path_readable(app: AppHandle, path: String) -> bool {
+    let Ok(path) = PathBuf::from(path).canonicalize() else { return false };
+    app.fs_scope().is_allowed(path)
+}
+
+#[tauri::command]
+fn read_text_path(app: AppHandle, path: String) -> Result<String, String> {
+    let path = require_read_scope(&app, Path::new(&path))?;
+    let bytes = fs::read(&path).map_err(|e| format!("读取文本失败：{e}"))?;
+    decode_text(bytes)
+}
+
+#[tauri::command]
 fn read_builtin_support(kind: String) -> Result<String, String> {
     match kind.as_str() {
         "model" => Ok(include_str!("../resources/soldier_army_normandy_ranger_1.xml").to_string()),
         "animation" => Ok(include_str!("../resources/soldier_animations.xml").to_string()),
         _ => Err("未知的内置人物资源类型".into()),
     }
+}
+
+#[tauri::command]
+fn read_binary_base64(app: AppHandle, path: String) -> Result<String, String> {
+    let path = require_read_scope(&app, Path::new(&path))?;
+    let bytes = fs::read(&path).map_err(|e| format!("读取二进制资源失败：{e}"))?;
+    Ok(STANDARD.encode(bytes))
 }
 
 #[tauri::command]
@@ -405,11 +433,13 @@ async fn save_vehicle(app: AppHandle, state: State<'_, AppState>, path: String, 
         }
         requested
     };
-    let target = ensure_vehicle_extension(target);
+    let target = normalize_vehicle_save_path(target)?;
+    if save_as {
+        app.fs_scope().allow_file(&target).map_err(|e| format!("无法授权另存文件：{e}"))?;
+    }
     let backup = write_backup(&target)?;
     atomic_write(&target, text.as_bytes())?;
     let canonical = target.canonicalize().map_err(|e| format!("无法确认已保存文件：{e}"))?;
-    app.fs_scope().allow_file(&canonical).map_err(|e| format!("保存成功，但无法授权新文件读取：{e}"))?;
     state.writable.lock().map_err(|_| "文件权限状态不可用")?.insert(canonical.clone());
     Ok(Some(SavedFile { name: file_name(&canonical), path: display(&canonical), backup_path: backup.map(|p| display(&p)) }))
 }
@@ -491,9 +521,15 @@ fn decode_text(mut bytes: Vec<u8>) -> Result<String, String> {
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) { bytes.drain(..3); }
     String::from_utf8(bytes).map_err(|_| "文件不是有效 UTF-8；请先转为 UTF-8 后再编辑".to_string())
 }
-fn ensure_vehicle_extension(mut p: PathBuf) -> PathBuf {
-    if p.extension().is_none() { p.set_extension("vehicle"); }
-    p
+fn normalize_vehicle_save_path(mut path: PathBuf) -> Result<PathBuf, String> {
+    match path.extension().and_then(|v| v.to_str()) {
+        None => {
+            path.set_extension("vehicle");
+            Ok(path)
+        }
+        Some(ext) if ext.eq_ignore_ascii_case("vehicle") || ext.eq_ignore_ascii_case("xml") => Ok(path),
+        Some(_) => Err("载具只能另存为 .vehicle 或 .xml 文件".into()),
+    }
 }
 fn display(p: &Path) -> String { p.to_string_lossy().into_owned() }
 fn file_name(p: &Path) -> String { p.file_name().and_then(|v| v.to_str()).unwrap_or("unnamed").to_string() }
@@ -510,6 +546,7 @@ mod tests {
         assert!(attributes["visual"].contains("class"));
         assert!(attributes["part"].contains("texture_filename"));
         assert!(attributes["turret"].contains("weapon_key"));
+        assert!(attributes["vehicle"].contains("name"));
     }
 
     #[test]
@@ -673,7 +710,7 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![open_vehicle, open_vehicle_path, resolve_vehicle_base, choose_vehicle_base, choose_vehicle_workspace, scan_vehicle_workspace, scan_vehicle_schema, list_workspace_dir,
             choose_folder, choose_override_file, choose_support_file,
-            scan_resource_folder, read_builtin_support, save_vehicle, register_vehicle_session, register_weapon_session, save_weapon])
+            scan_resource_folder, is_path_readable, read_text_path, read_builtin_support, read_binary_base64, save_vehicle, register_vehicle_session, register_weapon_session, save_weapon])
         .run(tauri::generate_context!())
         .expect("RWR Vehicle Studio failed to start");
 }

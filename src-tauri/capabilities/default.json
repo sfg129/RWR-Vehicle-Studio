@@ -12,8 +12,6 @@
     "dialog:allow-message",
     "dialog:allow-ask",
     "dialog:allow-confirm",
-    "process:allow-exit",
-    "fs:allow-read-file",
-    "fs:allow-read-text-file"
+    "process:allow-exit"
   ]
 }

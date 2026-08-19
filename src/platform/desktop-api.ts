@@ -1,5 +1,4 @@
 import { invoke } from '@tauri-apps/api/core';
-import { readFile } from '@tauri-apps/plugin-fs';
 
 export interface OpenedFile { name: string; path: string; text: string }
 export interface SavedFile { name: string; path: string; backupPath?: string }
@@ -8,6 +7,13 @@ export interface VehicleWorkspace { root: string; entries: VehicleWorkspaceEntry
 export interface VehicleSchema { objectTypes: string[]; attributes: Record<string, string[]>; skipped: string[] }
 export interface ResourceFolderScan { index: Record<string, string>; duplicates: string[]; warnings: string[] }
 export type ResourceKind = 'model' | 'texture' | 'weapon';
+
+function decodeBase64(base64: string): ArrayBuffer {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
 
 export const desktop = {
   openVehicle: () => invoke<OpenedFile | null>('open_vehicle'),
@@ -23,14 +29,9 @@ export const desktop = {
   chooseSupportFile: (kind: 'model' | 'animation') => invoke<string | null>('choose_support_file', { kind }),
   readBuiltinSupport: (kind: 'model' | 'animation') => invoke<string>('read_builtin_support', { kind }),
   scanFolder: (path: string, kind: ResourceKind) => invoke<ResourceFolderScan>('scan_resource_folder', { path, kind }),
-  readText: async (path: string): Promise<string> => {
-    const bytes = await readFile(path);
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  },
-  readBinary: async (path: string): Promise<ArrayBuffer> => {
-    const bytes = await readFile(path);
-    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-  },
+  isPathReadable: (path: string) => invoke<boolean>('is_path_readable', { path }),
+  readText: (path: string) => invoke<string>('read_text_path', { path }),
+  readBinary: async (path: string): Promise<ArrayBuffer> => decodeBase64(await invoke<string>('read_binary_base64', { path })),
   saveVehicle: (path: string, text: string, saveAs = false) =>
     invoke<SavedFile | null>('save_vehicle', { path, text, saveAs }),
   registerVehicleSession: (path: string) => invoke<void>('register_vehicle_session', { path }),

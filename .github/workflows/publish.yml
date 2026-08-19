@@ -187,6 +187,20 @@ jobs:
             echo "No release assets found" >&2
             exit 1
           fi
+
+          mapfile -t asset_names < <(
+            for asset in "${assets[@]}"; do
+              basename "$asset"
+            done
+          )
+
+          duplicates="$(printf '%s\n' "${asset_names[@]}" | sort | uniq -d)"
+          if [ -n "$duplicates" ]; then
+            echo "Duplicate release asset names:" >&2
+            echo "$duplicates" >&2
+            exit 1
+          fi
+
           if gh release view nightly >/dev/null 2>&1; then
             gh release upload nightly "${assets[@]}" --clobber
           else

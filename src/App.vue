@@ -20,6 +20,7 @@ import {
   BUILTIN_SUPPORT_MODEL,
   DEFAULT_RESOURCE_SELECTION,
   cloneResourceSelection,
+  isBuiltinSupport,
   loadResourcePreferences,
   type ResourceSelection,
 } from './core/resources/resource-presets';
@@ -77,14 +78,14 @@ function readRecoverySnapshot(): RecoverySnapshot | null {
   } catch { localStorage.removeItem(RECOVERY_KEY); return null; }
 }
 async function applyRecoverySnapshot(recovery: RecoverySnapshot): Promise<void> {
-  localStorage.removeItem(RECOVERY_KEY);
+  const registrationFailures: string[] = [];
   if (recovery.vehicle) {
     opened.value = { name: recovery.vehicle.name, path: recovery.vehicle.path, text: recovery.vehicle.workingText };
     document.value = new SourceDocument(recovery.vehicle.workingText);
     savedText.value = recovery.vehicle.savedText;
     undoStack.value = []; missing.value = []; collapsedGroups.clear();
     markDocumentChanged();
-    try { await desktop.registerVehicleSession(recovery.vehicle.path); } catch (error) { status.value = `载具恢复注册失败：${message(error)}`; }
+    try { await desktop.registerVehicleSession(recovery.vehicle.path); } catch (error) { registrationFailures.push(`载具：${recovery.vehicle.path}（${message(error)}）`); }
     await resolveAutomaticBase();
     rebuildPreview(false);
     if (hasRememberedResources.value) {
@@ -100,10 +101,15 @@ async function applyRecoverySnapshot(recovery: RecoverySnapshot): Promise<void> 
     if (weaponSessions.has(item.path)) continue;
     const session: WeaponSession = { key: item.key, path: item.path, name: item.name, document: new SourceDocument(item.workingText), savedText: item.savedText, undoStack: [] };
     weaponSessions.set(item.path, session);
-    try { await desktop.registerWeaponSession(item.path); } catch { /* 路径不可用则跳过注册，保存时会提示 */ }
+    try { await desktop.registerWeaponSession(item.path); } catch (error) { registrationFailures.push(`武器：${item.path}（${message(error)}）`); }
   }
   updateWeaponDirtyCount();
   markDocumentChanged();
+  if (registrationFailures.length) {
+    status.value = `已恢复未保存内容，但以下原文件需要重新授权：\n${registrationFailures.join('\n')}`;
+  } else {
+    localStorage.removeItem(RECOVERY_KEY);
+  }
 }
 async function maybeOfferRecovery(): Promise<void> {
   const recovery = readRecoverySnapshot(); if (!recovery) return;
@@ -160,7 +166,8 @@ const rootAvailableAttributes = computed(() => {
   void documentRevision.value;
   const root = document.value?.root; if (!root) return [];
   const existing = new Set(root.attributes.map((attribute) => attribute.name));
-  return ['file', ...(vehicleSchema.value.attributes['vehicle'] ?? [])].filter((name) => !existing.has(name));
+  const candidates = new Set(['file', ...(vehicleSchema.value.attributes.vehicle ?? [])]);
+  return [...candidates].filter((name) => !existing.has(name));
 });
 
 async function openVehicle() {
@@ -174,7 +181,11 @@ async function openVehicle() {
 let vehicleLoadToken = 0;
 async function loadOpenedVehicle(file: OpenedFile) {
   const token = ++vehicleLoadToken;
-  opened.value = file; document.value = new SourceDocument(file.text); savedText.value = file.text; undoStack.value = []; missing.value = []; collapsedGroups.clear();
+  const parsed = new SourceDocument(file.text);
+  if (parsed.root?.name !== 'vehicle') {
+    throw new Error(`所选文件 ${file.name} 的根元素不是 <vehicle>`);
+  }
+  opened.value = file; document.value = parsed; savedText.value = file.text; undoStack.value = []; missing.value = []; collapsedGroups.clear();
   if (document.value.structuralErrors.length) status.value = `已打开 ${file.name}；检测到 ${document.value.structuralErrors.length} 处 XML 结构问题（保存时会提示）`;
   await resolveAutomaticBase(token);
   if (token !== vehicleLoadToken) return;
@@ -310,6 +321,19 @@ async function activateWorkspaceEntry(entry: VehicleWorkspaceEntry) {
 }
 async function indexRememberedResources(selection: ResourceSelection, token: number) {
   try {
+    const missing: string[] = [];
+    for (const [kind, path] of Object.entries(selection.folders)) {
+      if (path && !(await desktop.isPathReadable(path))) missing.push(`${kind}: ${path}`);
+    }
+    if (!isBuiltinSupport(selection.supportModel) && !(await desktop.isPathReadable(selection.supportModel))) missing.push(`人物模型：${selection.supportModel}`);
+    if (!isBuiltinSupport(selection.supportAnimations) && !(await desktop.isPathReadable(selection.supportAnimations))) missing.push(`人物动画：${selection.supportAnimations}`);
+    if (missing.length) {
+      if (token === vehicleLoadToken) {
+        status.value = '上次使用的资源预设需要重新授权。请在资源窗口点击“重新授权资源根目录”。';
+        resourceDialog.value = true;
+      }
+      return;
+    }
     const applied = await catalog.applyFolders({ ...selection.folders }); if (token !== vehicleLoadToken) return;
     await resourcesApplied(selection, token, applied.changed);
   } catch (error) {
@@ -320,7 +344,7 @@ async function indexRememberedResources(selection: ResourceSelection, token: num
 async function resourcesApplied(selection: ResourceSelection, token = ++vehicleLoadToken, resourceChanged = true) {
   hasRememberedResources.value = true;
   rememberedSelection = cloneResourceSelection(selection); supportModel.value = selection.supportModel; supportAnimations.value = selection.supportAnimations;
-  resourceDialog.value = false; if (resourceChanged) invalidateSoldierAssets(); const soldierLoaded = await loadSoldier(token); if (token !== vehicleLoadToken) return; if (!soldierLoaded) { resourceDialog.value = true; return; } await validate(); if (token !== vehicleLoadToken) return; if (resourceChanged) resourceGeneration.value++; markSceneChanged(); await loadSelectedWeaponEditor();
+  resourceDialog.value = false; if (resourceChanged) invalidateSoldierAssets(); const soldierLoaded = await loadSoldier(token); if (token !== vehicleLoadToken) return; if (!soldierLoaded) { resourceDialog.value = true; return; } await validate(); if (token !== vehicleLoadToken) return; if (resourceChanged) resourceGeneration.value++; markSceneChanged(); for (const session of weaponSessions.values()) { try { await desktop.registerWeaponSession(session.path); } catch { /* 旧 scope 尚未恢复时忽略，重新授权后再次尝试 */ } } await loadSelectedWeaponEditor();
   const diagnostics = catalog.scanDiagnostics; const total = diagnostics.duplicates.length + diagnostics.warnings.length;
   status.value = `已载入：${entries.value.filter((e) => e.kind === 'visual').length} 个外观，${entries.value.filter((e) => e.kind === 'slot').length} 个乘员位${total ? `；资源扫描发现 ${total} 个问题` : ''}`;
 }
@@ -592,36 +616,51 @@ function keydown(event: KeyboardEvent) {
 watch(selectedWeaponKey, () => { void loadSelectedWeaponEditor(); });
 let unlistenClose: UnlistenFn | undefined;
 let exiting = false;
+let closeRequestPending = false;
 onMounted(async () => {
   window.addEventListener('keydown', keydown);
   // RV-043 / R4-016: Tauri native close-request is the only desktop close guard.
   try {
     const appWindow = getCurrentWindow();
     unlistenClose = await appWindow.onCloseRequested(async (event) => {
-      // 一进入 closeRequested 就同步 preventDefault，默认 close 链不再继续；最终退出只由 exit(0) 完成。
       event.preventDefault();
-      if (exiting) return;
-      if (anyDirty.value) {
-        let confirmed = false;
-        try {
-          confirmed = await tauriConfirm('有未保存修改，仍要退出吗？', {
-            title: 'RWR Vehicle Studio',
-            kind: 'warning',
-            okLabel: '退出',
-            cancelLabel: '取消',
-          });
-        } catch {
-          confirmed = window.confirm('有未保存修改，仍要退出吗？');
-        }
-        if (!confirmed) return;
-        captureRecoverySnapshot();
+
+      if (exiting || closeRequestPending) return;
+
+      if (saving.value) {
+        status.value = '保存正在进行，请稍后再退出';
+        return;
       }
-      exiting = true;
+
+      closeRequestPending = true;
+
       try {
+        if (anyDirty.value) {
+          let confirmed = false;
+
+          try {
+            confirmed = await tauriConfirm('有未保存修改，仍要退出吗？', {
+              title: 'RWR Vehicle Studio',
+              kind: 'warning',
+              okLabel: '退出',
+              cancelLabel: '取消',
+            });
+          } catch {
+            confirmed = window.confirm('有未保存修改，仍要退出吗？');
+          }
+
+          if (!confirmed) return;
+
+          captureRecoverySnapshot();
+        }
+
+        exiting = true;
         await exit(0);
       } catch (error) {
         exiting = false;
         status.value = `退出应用失败：${message(error)}`;
+      } finally {
+        if (!exiting) closeRequestPending = false;
       }
     });
   } catch { /* 纯浏览器 / 非 Tauri runtime 时没有原生 close guard */ }

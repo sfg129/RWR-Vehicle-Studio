@@ -2844,6 +2844,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 name = "rwr-vehicle-studio"
 version = "0.2.3"
 dependencies = [
+ "base64 0.22.1",
  "serde",
  "serde_json",
  "tauri",

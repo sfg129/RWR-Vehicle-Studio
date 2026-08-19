@@ -32,7 +32,7 @@ RWR Vehicle Studio is an offline visual vehicle editor for _Running With Rifles_
 每次推送到 `main` 都会由 CI 自动构建并发布到 [Releases](https://github.com/sfg129/RWR-Vehicle-Studio/releases) 的滚动 **nightly** 预发布条目（每次提交覆盖刷新）：
 
 - Windows：NSIS 安装程序（`.exe`）；
-- macOS：磁盘映像（`.dmg`）；
+- macOS：磁盘映像（`.dmg`）与便携版（`.app.zip`）；
 - Linux：Debian 包（`.deb`）与便携 `.appimage`。
 
 ## 开发与构建
