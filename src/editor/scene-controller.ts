@@ -3,6 +3,8 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { desktop } from '../platform/desktop-api';
 import { parseOgreMesh, type OgreMesh } from '../core/ogre/mesh-reader';
+import { DDSLoader } from 'three/examples/jsm/loaders/DDSLoader.js';
+import { TGALoader } from 'three/examples/jsm/loaders/TGALoader.js';
 import type { SourceDocument, SourceNode } from '../core/xml/source-document';
 import type { ResourceCatalog } from '../core/resources/resource-catalog';
 import { characterSlotHidden, characterSlotPose, dragNeedsRebuild, editableBasisRotation, idleState, localDragValue, rotateY, tireVisualPosition, turretWorldPose, visualMatchesDamageState, WEAPON_LOGICAL_TO_MODEL_YAW } from '../core/vehicle/vehicle-model';
@@ -29,7 +31,7 @@ export class SceneController {
   private renderer: THREE.WebGLRenderer; private controls: OrbitControls; private transform: TransformControls;
   private root = new THREE.Group(); private selectedHelper?: THREE.BoxHelper; private proxy = new THREE.Object3D(); private drag?: DragInfo;
   private doc?: SourceDocument; private catalog?: ResourceCatalog; private soldier?: SoldierAssets; private options?: ViewOptions;
-  private meshCache = new Map<string, Promise<OgreMesh>>(); private textureCache = new Map<string, Promise<THREE.Texture>>(); private voxelCache = new Map<string, Promise<StaticVoxel[]>>();
+  private meshCache = new Map<string, Promise<OgreMesh>>(); private textureCache = new Map<string, Promise<THREE.Texture>>(); private voxelCache = new Map<string, Promise<StaticVoxel[]>>(); private resolvedTextures = new Set<THREE.Texture>(); private resolvedTexturePaths = new Map<THREE.Texture, string>();
   private geometryCache = new Map<string, THREE.BufferGeometry>(); private sharedAssets = new Set<THREE.BufferGeometry | THREE.Material>();
   private nodeObjects = new Map<number, THREE.Object3D>(); private occupants: Occupant[] = []; private startTime = performance.now();
   private sceneGeneration = 0;
@@ -40,7 +42,7 @@ export class SceneController {
   private fpsFrames = 0; private fpsStarted = performance.now();
 
   constructor(private host: HTMLElement, private onSelect: (id: number) => void, private onMove: (node: SourceNode, attr: string, value: Vec3, needsRebuild: boolean) => void,
-    private onStats: (fps: number, dynamicOccupants: number) => void) {
+    private onStats: (fps: number, dynamicOccupants: number) => void, private onDiagnostic: (message: string) => void = () => {}) {
     this.scene.background = new THREE.Color(0x0d1115); this.scene.fog = new THREE.Fog(0x0d1115, 80, 250);
     this.camera.position.set(16, 11, 18);
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -115,7 +117,7 @@ export class SceneController {
         }
         if (generation !== this.sceneGeneration) return;
         object.position.set(...origin); object.userData.nodeId = visual.id; object.traverse((o) => o.userData.nodeId = visual.id); this.root.add(object); this.pickTargets.push(object); this.nodeObjects.set(visual.id, object);
-      } catch (error) { if (generation === this.sceneGeneration) console.warn(`模型加载失败：${a.mesh_filename}`, error); }
+      } catch (error) { if (generation === this.sceneGeneration) { console.warn(`模型加载失败：${a.mesh_filename}`, error); this.onDiagnostic(`模型加载失败：${a.mesh_filename}`); } }
     });
     await mapLimit(turrets.map((turret, index) => ({ turret, index })), ASSET_CONCURRENCY, ({ turret, index }) => this.addWeapon(turret, index, globalOffset, generation));
     if (options.showBounds && physics) this.addBounds(physics);
@@ -126,11 +128,20 @@ export class SceneController {
   /** Refresh only the working document reference after a transform-only edit; the scene objects are updated in place (RV-025). */
   updateDocument(doc: SourceDocument): void { this.doc = doc; }
 
+  /** Enable/disable gizmo editing (e.g. while a save is in flight, R4-001). */
+  setEditingEnabled(enabled: boolean): void {
+    this.transform.enabled = enabled;
+    if (!enabled) { this.transform.detach(); this.drag = undefined; }
+  }
+
   /** Drop promise and GPU geometry caches after a forced resource reindex (R3-014/015/016). */
   invalidateAssetCaches(): void {
     this.meshCache.clear();
     this.textureCache.clear();
     this.voxelCache.clear();
+    for (const texture of this.resolvedTextures) texture.dispose();
+    this.resolvedTextures.clear();
+    this.resolvedTexturePaths.clear();
     for (const geometry of this.geometryCache.values()) {
       this.sharedAssets.delete(geometry);
       geometry.dispose();
@@ -162,18 +173,40 @@ export class SceneController {
   topView(): void { this.camera.position.set(0, 28, 0.01); this.controls.target.set(0, 0, 0); this.controls.update(); }
   sideView(): void { this.camera.position.set(28, 4, 0); this.controls.target.set(0, 1.5, 0); this.controls.update(); }
 
-  /** Keep app-lifetime GPU geometry cache bounded; never evict geometries used by the current scene (R3-016). */
+  /** Keep app-lifetime caches bounded; never evict geometries/textures used by the current scene (R3-016 / R4-009c). */
   private enforceAssetLimits(): void {
-    const limit = 256;
-    if (this.geometryCache.size <= limit) return;
-    const used = new Set<THREE.BufferGeometry>();
-    this.root.traverse((object: any) => { if (object.geometry) used.add(object.geometry); });
+    const geometryLimit = 256;
+    const textureLimit = 128;
+    const assetLimit = 128;
+    const usedGeometries = new Set<THREE.BufferGeometry>();
+    const usedTextures = new Set<THREE.Texture>();
+    this.root.traverse((object: any) => {
+      if (object.geometry) usedGeometries.add(object.geometry);
+      const materials = Array.isArray(object.material) ? object.material : object.material ? [object.material] : [];
+      for (const material of materials) if (material?.map) usedTextures.add(material.map);
+    });
     for (const [key, geometry] of this.geometryCache) {
-      if (this.geometryCache.size <= limit) break;
-      if (used.has(geometry)) continue;
+      if (this.geometryCache.size <= geometryLimit) break;
+      if (usedGeometries.has(geometry)) continue;
       this.geometryCache.delete(key);
       this.sharedAssets.delete(geometry);
       geometry.dispose();
+    }
+    for (const [texture, path] of this.resolvedTexturePaths) {
+      if (this.resolvedTexturePaths.size <= textureLimit) break;
+      if (usedTextures.has(texture)) continue;
+      this.resolvedTexturePaths.delete(texture);
+      this.resolvedTextures.delete(texture);
+      this.textureCache.delete(path);
+      texture.dispose();
+    }
+    if (this.meshCache.size > assetLimit) {
+      let extra = this.meshCache.size - assetLimit;
+      for (const key of this.meshCache.keys()) { if (extra <= 0) break; this.meshCache.delete(key); extra--; }
+    }
+    if (this.voxelCache.size > assetLimit) {
+      let extra = this.voxelCache.size - assetLimit;
+      for (const key of this.voxelCache.keys()) { if (extra <= 0) break; this.voxelCache.delete(key); extra--; }
     }
   }
 
@@ -204,7 +237,7 @@ export class SceneController {
       }
       if (!group.children.length) return;
       group.userData.nodeId = turret.id; group.traverse((object) => object.userData.nodeId = turret.id); this.root.add(group); this.pickTargets.push(group); this.nodeObjects.set(turret.id, group);
-    } catch (error) { console.warn(`武器模型加载失败：${weapon.mesh ?? weapon.voxelModel ?? a.weapon_key}`, error); }
+    } catch (error) { console.warn(`武器模型加载失败：${weapon.mesh ?? weapon.voxelModel ?? a.weapon_key}`, error); this.onDiagnostic(`武器模型加载失败：${weapon.mesh ?? weapon.voxelModel ?? a.weapon_key}`); }
   }
 
   private buildVoxelModel(voxels: StaticVoxel[]): THREE.InstancedMesh {
@@ -253,7 +286,7 @@ export class SceneController {
         this.geometryCache.set(cacheKey, geometry); this.sharedAssets.add(geometry);
       }
       const textureName = textures[Math.min(i, textures.length - 1)] || textures[0]; const texturePath = this.catalog.resolve(textureName, 'texture');
-      let map: THREE.Texture | undefined; if (texturePath) try { map = await this.loadTexture(texturePath); if (generation !== this.sceneGeneration) return group; } catch { /* fallback material */ }
+      let map: THREE.Texture | undefined; if (texturePath) try { map = await this.loadTexture(texturePath); if (generation !== this.sceneGeneration) return group; } catch (error) { if (generation === this.sceneGeneration) this.onDiagnostic(`纹理加载失败：${texturePath}`); }
       const material = new THREE.MeshStandardMaterial({ map, color: map ? 0xffffff : colorFromName(sub.materialName), roughness: 0.78, metalness: 0.08, side: THREE.DoubleSide });
       const part = new THREE.Mesh(geometry, material); part.castShadow = false; part.receiveShadow = false; part.name = sub.name; group.add(part);
     }
@@ -267,12 +300,26 @@ export class SceneController {
   private loadMesh(path: string): Promise<OgreMesh> { return this.loadCached(this.meshCache, path, () => desktop.readBinary(path).then(parseOgreMesh)); }
   private loadVoxels(path: string): Promise<StaticVoxel[]> { return this.loadCached(this.voxelCache, path, () => desktop.readText(path).then(parseStaticVoxelModel)); }
   private loadTexture(path: string): Promise<THREE.Texture> {
+    const ext = path.split('.').at(-1)?.toLowerCase();
+    if (ext === 'dds') return this.loadCached(this.textureCache, path, () => desktop.readBinary(path).then((buffer) => new Promise<THREE.Texture>((resolve, reject) => {
+      const url = URL.createObjectURL(new Blob([buffer]));
+      new DDSLoader().load(url, (texture) => {
+        URL.revokeObjectURL(url); texture.colorSpace = THREE.SRGBColorSpace; texture.needsUpdate = true;
+        this.resolvedTextures.add(texture); this.resolvedTexturePaths.set(texture, path); resolve(texture);
+      }, undefined, (e) => { URL.revokeObjectURL(url); reject(e); });
+    })));
+    if (ext === 'tga') return this.loadCached(this.textureCache, path, () => desktop.readBinary(path).then((buffer) => new Promise<THREE.Texture>((resolve, reject) => {
+      const url = URL.createObjectURL(new Blob([buffer]));
+      new TGALoader().load(url, (texture) => {
+        URL.revokeObjectURL(url); texture.colorSpace = THREE.SRGBColorSpace; texture.flipY = false; texture.needsUpdate = true;
+        this.resolvedTextures.add(texture); this.resolvedTexturePaths.set(texture, path); resolve(texture);
+      }, undefined, (e) => { URL.revokeObjectURL(url); reject(e); });
+    })));
+    if (!['png', 'jpg', 'jpeg', 'bmp'].includes(ext ?? '')) return Promise.reject(new Error(`暂不支持浏览器纹理格式 ${ext ?? '未知'}`));
     return this.loadCached(this.textureCache, path, () => desktop.readBinary(path).then((buffer) => new Promise<THREE.Texture>((resolve, reject) => {
-      const ext = path.split('.').at(-1)?.toLowerCase();
-      if (!['png', 'jpg', 'jpeg', 'bmp'].includes(ext ?? '')) { reject(new Error(`暂不支持浏览器纹理格式 ${ext}`)); return; }
       const url = URL.createObjectURL(new Blob([buffer]));
       new THREE.TextureLoader().load(url,
-        (texture) => { URL.revokeObjectURL(url); texture.colorSpace = THREE.SRGBColorSpace; texture.flipY = false; resolve(texture); },
+        (texture) => { URL.revokeObjectURL(url); texture.colorSpace = THREE.SRGBColorSpace; texture.flipY = false; this.resolvedTextures.add(texture); this.resolvedTexturePaths.set(texture, path); resolve(texture); },
         undefined,
         (e) => { URL.revokeObjectURL(url); reject(e); });
     })));

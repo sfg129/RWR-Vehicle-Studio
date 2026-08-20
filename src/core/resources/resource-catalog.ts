@@ -9,6 +9,7 @@ export interface WeaponShield { offset: Vec3; extent: Vec3 }
 export interface WeaponModel { sourcePath: string; mesh?: string; voxelModel?: string; texture?: string; shields: WeaponShield[] }
 export type ResourceFailureKind = 'missing' | 'read_error' | 'parse_error';
 export type ResourceResult<T> = { ok: true; value: T } | { ok: false; kind: ResourceFailureKind; message: string };
+export interface ApplyFoldersResult { changed: boolean; version: number }
 
 /** Thrown when an older applyFolders() invocation loses to a newer one (R3-005). */
 export class StaleResourceApplyError extends Error {
@@ -35,6 +36,7 @@ export class ResourceCatalog {
   private scans: Record<ResourceKind, ResourceFolderScan> = { model: EMPTY_SCAN(), texture: EMPTY_SCAN(), weapon: EMPTY_SCAN() };
   private scanned = false;
   private applyGeneration = 0;
+  private resourceVersion = 0;
 
   /** Non-fatal diagnostics from the last folder scan, aggregated across the three kinds. */
   get scanDiagnostics(): { duplicates: string[]; warnings: string[] } {
@@ -52,7 +54,7 @@ export class ResourceCatalog {
     this.weaponCache.clear();
   }
   /** Scan all three folders first, then commit atomically; a failed scan leaves the catalog untouched. Unchanged paths are reused (RV-014). */
-  async applyFolders(folders: FolderSettings, force = false): Promise<void> {
+  async applyFolders(folders: FolderSettings, force = false): Promise<ApplyFoldersResult> {
     const generation = ++this.applyGeneration;
     const stale = () => generation !== this.applyGeneration;
     const indexes: Record<ResourceKind, Record<string, string>> = { model: {}, texture: {}, weapon: {} };
@@ -71,7 +73,8 @@ export class ResourceCatalog {
     this.indexes = indexes;
     this.scans = scans;
     this.scanned = true;
-    if (changed) this.weaponCache.clear();
+    if (changed) { this.resourceVersion++; this.weaponCache.clear(); }
+    return { changed, version: this.resourceVersion };
   }
   /** Re-scan the currently configured folders (explicit refresh, bypasses the same-path fast path). */
   async refreshFolders(): Promise<void> {
@@ -85,6 +88,11 @@ export class ResourceCatalog {
     this.weaponCache.clear();
   }
   override(path: string): void { this.overrides[fileName(path).toLowerCase()] = path; this.weaponCache.clear(); }
+  removeOverride(name: string): void {
+    const key = fileName(name).toLowerCase();
+    if (this.overrides[key]) { delete this.overrides[key]; this.weaponCache.clear(); }
+  }
+  clearOverrides(): void { this.overrides = {}; this.weaponCache.clear(); }
   resolve(name: string | undefined, kind: ResourceKind): string | undefined {
     if (!name) return undefined;
     const key = fileName(name).toLowerCase();

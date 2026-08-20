@@ -45,6 +45,32 @@ describe('恢复本项（RV-009）', () => {
     expect(document.value(document.descendants('visual')[0], 'offset')).toBe('1 0 0');
     expect(document.value(document.descendants('turret')[0], 'offset')).toBe('5 0 0');
   });
+  it('delete sibling -> save -> edit survivor -> revert survivor（R4-002）', () => {
+    const document = new SourceDocument('<vehicle><visual class="A" offset="1 0 0"/><visual class="B" offset="2 0 0"/></vehicle>');
+    document.removeNode(document.descendants('visual')[0]);
+    document.markSaved();
+    const survivor = document.descendants('visual')[0];
+    document.set(survivor, 'offset', '9 9 9');
+    document.revertNode(survivor);
+    expect(document.value(document.descendants('visual')[0], 'offset')).toBe('2 0 0');
+  });
+  it('delete sibling -> addAttribute(survivor) -> revert survivor（R4-002）', () => {
+    const document = new SourceDocument('<vehicle><visual class="A"/><visual class="B"/></vehicle>');
+    document.removeNode(document.descendants('visual')[0]);
+    const survivor = document.descendants('visual')[0];
+    document.addAttribute(survivor, 'key', '7');
+    document.revertNode(survivor);
+    expect(document.value(document.descendants('visual')[0], 'key')).toBeUndefined();
+    expect(document.value(document.descendants('visual')[0], 'class')).toBe('B');
+  });
+  it('identical siblings 删除一个后 revert survivor 仍使用 survivor 身份（R4-002）', () => {
+    const document = new SourceDocument('<vehicle><visual class="X"/><visual class="X"/></vehicle>');
+    document.removeNode(document.descendants('visual')[0]);
+    const survivor = document.descendants('visual')[0];
+    document.set(survivor, 'class', 'Y');
+    document.revertNode(survivor);
+    expect(document.value(document.descendants('visual')[0], 'class')).toBe('X');
+  });
   it('同级节点删除后 revertNode 仍恢复到原节点的保存快照（R3-008）', () => {
     const document = new SourceDocument('<vehicle><visual class="A" offset="1 0 0"/><visual class="B" offset="2 0 0"/></vehicle>');
     document.removeNode(document.descendants('visual')[0]);
@@ -343,11 +369,35 @@ describe('XML 结构诊断（RV-031）', () => {
     const multiRoot = new SourceDocument('<vehicle/><vehicle/>');
     expect(multiRoot.structuralErrors.some((e) => e.includes('根元素数量'))).toBe(true);
   });
+  it('未闭合的声明 / 注释 / CDATA 不挂死并产生 structuralErrors（R4-010）', () => {
+    const declaration = new SourceDocument('<?xml version="1.0"');
+    expect(declaration.structuralErrors.some((e) => e.includes('声明'))).toBe(true);
+    const comment = new SourceDocument('<vehicle><!-- broken');
+    expect(comment.structuralErrors.some((e) => e.includes('注释'))).toBe(true);
+    const cdata = new SourceDocument('<vehicle><![CDATA[broken');
+    expect(cdata.structuralErrors.some((e) => e.includes('CDATA'))).toBe(true);
+  });
   it('结构良好的 XML 不产生 structuralErrors，且提交后仍保持良好', () => {
     const doc = new SourceDocument('<vehicle><turret weapon_key="x"/><visual class="a"/></vehicle>');
     expect(doc.structuralErrors).toEqual([]);
     doc.appendChild(doc.root!, 'slot', { position: '0 0 0' });
     expect(doc.structuralErrors).toEqual([]);
+  });
+});
+
+describe('保存 CAS（R4-001）', () => {
+  it('restoreSaved(savedText) 保留 save 飞行期间产生的更晚 pending 修改', () => {
+    const document = new SourceDocument('<vehicle><visual offset="1 0 0"/></vehicle>');
+    const savedSnapshot = document.serialize();
+    const saveText = document.serialize();
+    // save 飞行期间用户继续编辑
+    document.set(document.descendants('visual')[0], 'offset', '9 9 9');
+    document.restoreSaved(saveText);
+    expect(document.serialize()).toBe('<vehicle><visual offset="9 9 9"/></vehicle>');
+    expect(document.serialize()).not.toBe(saveText);
+    const reparsed = new SourceDocument(document.serialize());
+    expect(reparsed.value(reparsed.descendants('visual')[0], 'offset')).toBe('9 9 9');
+    void savedSnapshot;
   });
 });
 
