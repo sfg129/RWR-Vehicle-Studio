@@ -23,7 +23,7 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            args: "--target universal-apple-darwin"
+            args: "--target universal-apple-darwin --bundles app"
           - platform: ubuntu-22.04
             args: ""
           - platform: windows-latest
@@ -89,12 +89,13 @@ jobs:
           set -euo pipefail
           VERSION="${RELEASE_TAG#v}"
           APP_PATH="$(find src-tauri/target -path '*/release/bundle/macos/*.app' -print -quit)"
-          DMG_PATH="$(find src-tauri/target -path '*/release/bundle/dmg/*.dmg' -print -quit)"
           test -n "$APP_PATH"
-          test -n "$DMG_PATH"
           ditto -c -k --sequesterRsrc --keepParent \
             "$APP_PATH" \
             "RWR-Vehicle-Studio-${VERSION}-macos-universal.app.zip"
+          bun tauri bundle --target universal-apple-darwin --bundles dmg
+          DMG_PATH="$(find src-tauri/target -path '*/release/bundle/dmg/*.dmg' -print -quit)"
+          test -n "$DMG_PATH"
           cp "$DMG_PATH" "RWR-Vehicle-Studio-${VERSION}-macos-universal.dmg"
 
       - name: package Linux assets

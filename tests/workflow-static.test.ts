@@ -55,7 +55,9 @@ describe('formal release workflow', () => {
     const publish = workflow('publish.yml');
     expect(publish).toContain('tauri-apps/tauri-action@v1.0.0');
     expect(publish).not.toContain('tauri-apps/tauri-action@dev');
+    expect(publish).toContain('--target universal-apple-darwin --bundles app');
     expect(publish).toContain('ditto -c -k');
+    expect(publish).toContain('bun tauri bundle --target universal-apple-darwin --bundles dmg');
     expect(publish).toContain('macos-universal.app.zip');
     expect(publish).toContain('macos-universal.dmg');
     expect(publish).toContain('linux-x64.AppImage');
