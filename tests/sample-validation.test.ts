@@ -68,7 +68,9 @@ describe.skipIf(!existsSync(stuart) || !existsSync(sdkfz) || !existsSync(m10) ||
     const leaf = new SourceDocument(readFileSync(pak40Overlay, 'utf8'));
     const composed = composeVehicle(base, leaf);
     const entries = sceneEntries(composed.document);
-    expect(entries.filter((entry) => entry.kind === 'physics')).toHaveLength(1);
+    const physicsEntries = entries.filter((entry) => entry.kind === 'physics');
+    expect(physicsEntries.filter((entry) => entry.node.name === 'physics')).toHaveLength(1);
+    expect(physicsEntries.filter((entry) => entry.node.name === 'modifier')).toHaveLength(2);
     expect(entries.filter((entry) => entry.kind === 'visual')).toHaveLength(4);
     expect(entries.filter((entry) => entry.kind === 'slot')).toHaveLength(2);
     const turret = entries.find((entry) => entry.kind === 'turret')!;
@@ -111,13 +113,15 @@ describe.skipIf(!existsSync(soldierModel) || !existsSync(soldierAnimations))('�
     expect(rwrLinearToDisplay(0.128681)).toBeGreaterThan(0.39);
     expect(rwrLinearToDisplay(0.128681)).toBeLessThan(0.4);
   });
-  it('资源选择副本保留文件夹、人物模型和动画', () => {
+  it('资源选择副本保留主文件夹、有序次要来源、人物模型和动画', () => {
     const selection = cloneResourceSelection({
       folders: { model: 'models', texture: 'textures', weapon: 'weapons' },
+      secondaryFolders: { model: ['dlc-models', 'mod-models'], texture: ['dlc-textures'], weapon: [] },
       supportModel: BUILTIN_SUPPORT_MODEL,
       supportAnimations: BUILTIN_SUPPORT_ANIMATIONS,
     });
     expect(selection.folders).toEqual({ model: 'models', texture: 'textures', weapon: 'weapons' });
+    expect(selection.secondaryFolders).toEqual({ model: ['dlc-models', 'mod-models'], texture: ['dlc-textures'], weapon: [] });
     expect(selection.supportModel).toBe(BUILTIN_SUPPORT_MODEL);
     expect(selection.supportAnimations).toBe(BUILTIN_SUPPORT_ANIMATIONS);
   });
@@ -189,6 +193,19 @@ describe('乘员显示规则', () => {
     expect(attached.position[2]).toBeCloseTo(-1 - Math.sin(Math.PI / 2 + 0.5));
     expect(attached.rotation).toBeCloseTo(Math.PI / 2 + 0.75);
     expect(characterSlotPose(doc, slots[1], turrets).position).toEqual([2, 4, 6]);
+  });
+});
+
+describe('物理修正项分类', () => {
+  it('modifier 与 physics 同属基础 / 碰撞分组，并保留独立可编辑节点', () => {
+    const doc = new SourceDocument('<vehicle><modifier class="blast_range" value="0.65"/><modifier class="blast_damage" value="-5.4"/><physics mass="100"/></vehicle>');
+    const entries = sceneEntries(doc);
+    const physicsEntries = entries.filter((entry) => entry.kind === 'physics');
+    expect(physicsEntries).toHaveLength(3);
+    expect(physicsEntries.map((entry) => entry.index)).toEqual([0, 1, 2]);
+    expect(physicsEntries[1].label).toContain('blast_range');
+    doc.set(physicsEntries[2].node, 'value', '-4.8');
+    expect(doc.serialize()).toContain('class="blast_damage" value="-4.8"');
   });
 });
 

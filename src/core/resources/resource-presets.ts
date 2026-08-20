@@ -1,10 +1,11 @@
-import type { FolderSettings } from './resource-catalog';
+import { emptySecondaryFolders, type FolderSettings, type SecondaryFolderSettings } from './resource-catalog';
 
 export const BUILTIN_SUPPORT_MODEL = 'builtin://soldier/model';
 export const BUILTIN_SUPPORT_ANIMATIONS = 'builtin://soldier/animations';
 
 export interface ResourceSelection {
   folders: FolderSettings;
+  secondaryFolders: SecondaryFolderSettings;
   supportModel: string;
   supportAnimations: string;
 }
@@ -22,6 +23,7 @@ export interface ResourcePreferences {
 
 export const DEFAULT_RESOURCE_SELECTION: ResourceSelection = {
   folders: { model: '', texture: '', weapon: '' },
+  secondaryFolders: emptySecondaryFolders(),
   supportModel: BUILTIN_SUPPORT_MODEL,
   supportAnimations: BUILTIN_SUPPORT_ANIMATIONS,
 };
@@ -50,6 +52,7 @@ export function saveResourcePreferences(preferences: ResourcePreferences): void 
 export function cloneResourceSelection(selection: ResourceSelection): ResourceSelection {
   return {
     folders: { ...selection.folders },
+    secondaryFolders: cloneSecondaryFolders(selection.secondaryFolders),
     supportModel: selection.supportModel || BUILTIN_SUPPORT_MODEL,
     supportAnimations: selection.supportAnimations || BUILTIN_SUPPORT_ANIMATIONS,
   };
@@ -72,13 +75,29 @@ function normalizePreset(value: unknown): ResourcePreset | undefined {
 
 function normalizeSelection(value: Partial<ResourceSelection>): ResourceSelection {
   const folders = value.folders ?? DEFAULT_RESOURCE_SELECTION.folders;
+  const secondary = value.secondaryFolders;
   return {
     folders: {
       model: typeof folders.model === 'string' ? folders.model : '',
       texture: typeof folders.texture === 'string' ? folders.texture : '',
       weapon: typeof folders.weapon === 'string' ? folders.weapon : '',
     },
+    secondaryFolders: {
+      model: stringArray(secondary?.model),
+      texture: stringArray(secondary?.texture),
+      weapon: stringArray(secondary?.weapon),
+    },
     supportModel: typeof value.supportModel === 'string' && value.supportModel ? value.supportModel : BUILTIN_SUPPORT_MODEL,
     supportAnimations: typeof value.supportAnimations === 'string' && value.supportAnimations ? value.supportAnimations : BUILTIN_SUPPORT_ANIMATIONS,
   };
+}
+function cloneSecondaryFolders(value: SecondaryFolderSettings | undefined): SecondaryFolderSettings {
+  return {
+    model: [...(value?.model ?? [])],
+    texture: [...(value?.texture ?? [])],
+    weapon: [...(value?.weapon ?? [])],
+  };
+}
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }

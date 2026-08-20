@@ -29,7 +29,6 @@ export const desktop = {
   chooseSupportFile: (kind: 'model' | 'animation') => invoke<string | null>('choose_support_file', { kind }),
   readBuiltinSupport: (kind: 'model' | 'animation') => invoke<string>('read_builtin_support', { kind }),
   scanFolder: (path: string, kind: ResourceKind) => invoke<ResourceFolderScan>('scan_resource_folder', { path, kind }),
-  isPathReadable: (path: string) => invoke<boolean>('is_path_readable', { path }),
   readText: (path: string) => invoke<string>('read_text_path', { path }),
   readBinary: async (path: string): Promise<ArrayBuffer> => decodeBase64(await invoke<string>('read_binary_base64', { path })),
   saveVehicle: (path: string, text: string, saveAs = false) =>

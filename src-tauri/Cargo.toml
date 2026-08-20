@@ -1,6 +1,6 @@
 [package]
 name = "rwr-vehicle-studio"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 description = "Offline visual vehicle editor for Running With Rifles modding workflows"
 license = "GPL-3.0-only"
@@ -16,8 +16,6 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
-tauri-plugin-persisted-scope = "2"
 tauri-plugin-process = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"

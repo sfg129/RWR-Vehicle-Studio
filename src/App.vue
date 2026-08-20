@@ -20,7 +20,6 @@ import {
   BUILTIN_SUPPORT_MODEL,
   DEFAULT_RESOURCE_SELECTION,
   cloneResourceSelection,
-  isBuiltinSupport,
   loadResourcePreferences,
   type ResourceSelection,
 } from './core/resources/resource-presets';
@@ -35,6 +34,11 @@ let composition: VehicleComposition | undefined;
 const baseReference = ref(''); const baseOpened = ref<OpenedFile>(); const baseDocument = ref<SourceDocument>(); const baseAutomatic = ref(false); const baseError = ref('');
 const savedText = ref(''); const undoStack = ref<string[]>([]);
 catalog.folders = { ...rememberedSelection.folders };
+catalog.secondaryFolders = {
+  model: [...rememberedSelection.secondaryFolders.model],
+  texture: [...rememberedSelection.secondaryFolders.texture],
+  weapon: [...rememberedSelection.secondaryFolders.weapon],
+};
 const entries = ref<SceneEntry[]>([]); const selectedId = ref<number>(); const { documentRevision, sceneRevision, markDocumentChanged, markSceneChanged } = createEditorRevisions(); const resourceGeneration = ref(0); const status = ref('请选择 .vehicle 文件');
 const missing = ref<string[]>([]); const sceneDiagnostics = ref<string[]>([]); const resourceDialog = ref(false); const overrideDialog = ref(false); const soldier = ref<SoldierAssets>();
 const supportModel = ref(rememberedSelection.supportModel || BUILTIN_SUPPORT_MODEL);
@@ -106,7 +110,7 @@ async function applyRecoverySnapshot(recovery: RecoverySnapshot): Promise<void> 
   updateWeaponDirtyCount();
   markDocumentChanged();
   if (registrationFailures.length) {
-    status.value = `已恢复未保存内容，但以下原文件需要重新授权：\n${registrationFailures.join('\n')}`;
+    status.value = `已恢复未保存内容，但以下原文件已不存在或不可访问：\n${registrationFailures.join('\n')}`;
   } else {
     localStorage.removeItem(RECOVERY_KEY);
   }
@@ -321,20 +325,7 @@ async function activateWorkspaceEntry(entry: VehicleWorkspaceEntry) {
 }
 async function indexRememberedResources(selection: ResourceSelection, token: number) {
   try {
-    const missing: string[] = [];
-    for (const [kind, path] of Object.entries(selection.folders)) {
-      if (path && !(await desktop.isPathReadable(path))) missing.push(`${kind}: ${path}`);
-    }
-    if (!isBuiltinSupport(selection.supportModel) && !(await desktop.isPathReadable(selection.supportModel))) missing.push(`人物模型：${selection.supportModel}`);
-    if (!isBuiltinSupport(selection.supportAnimations) && !(await desktop.isPathReadable(selection.supportAnimations))) missing.push(`人物动画：${selection.supportAnimations}`);
-    if (missing.length) {
-      if (token === vehicleLoadToken) {
-        status.value = '上次使用的资源预设需要重新授权。请在资源窗口点击“重新授权资源根目录”。';
-        resourceDialog.value = true;
-      }
-      return;
-    }
-    const applied = await catalog.applyFolders({ ...selection.folders }); if (token !== vehicleLoadToken) return;
+    const applied = await catalog.applyFolders({ ...selection.folders }, false, selection.secondaryFolders); if (token !== vehicleLoadToken) return;
     await resourcesApplied(selection, token, applied.changed);
   } catch (error) {
     if (token !== vehicleLoadToken || error instanceof StaleResourceApplyError) return;
@@ -344,7 +335,7 @@ async function indexRememberedResources(selection: ResourceSelection, token: num
 async function resourcesApplied(selection: ResourceSelection, token = ++vehicleLoadToken, resourceChanged = true) {
   hasRememberedResources.value = true;
   rememberedSelection = cloneResourceSelection(selection); supportModel.value = selection.supportModel; supportAnimations.value = selection.supportAnimations;
-  resourceDialog.value = false; if (resourceChanged) invalidateSoldierAssets(); const soldierLoaded = await loadSoldier(token); if (token !== vehicleLoadToken) return; if (!soldierLoaded) { resourceDialog.value = true; return; } await validate(); if (token !== vehicleLoadToken) return; if (resourceChanged) resourceGeneration.value++; markSceneChanged(); for (const session of weaponSessions.values()) { try { await desktop.registerWeaponSession(session.path); } catch { /* 旧 scope 尚未恢复时忽略，重新授权后再次尝试 */ } } await loadSelectedWeaponEditor();
+  resourceDialog.value = false; if (resourceChanged) invalidateSoldierAssets(); const soldierLoaded = await loadSoldier(token); if (token !== vehicleLoadToken) return; if (!soldierLoaded) { resourceDialog.value = true; return; } await validate(); if (token !== vehicleLoadToken) return; if (resourceChanged) resourceGeneration.value++; markSceneChanged(); for (const session of weaponSessions.values()) { try { await desktop.registerWeaponSession(session.path); } catch { /* 文件可能已在会话期间被移动或删除 */ } } await loadSelectedWeaponEditor();
   const diagnostics = catalog.scanDiagnostics; const total = diagnostics.duplicates.length + diagnostics.warnings.length;
   status.value = `已载入：${entries.value.filter((e) => e.kind === 'visual').length} 个外观，${entries.value.filter((e) => e.kind === 'slot').length} 个乘员位${total ? `；资源扫描发现 ${total} 个问题` : ''}`;
 }
@@ -361,7 +352,7 @@ async function loadSoldier(token = ++vehicleLoadToken): Promise<boolean> {
   } catch (error) {
     if (token === vehicleLoadToken) {
       soldier.value = undefined;
-      status.value = `人物预览未载入：${message(error)}。` + '如果这是旧版本保存的自定义人物资源，请重新选择该文件以授予读取权限。';
+      status.value = `人物预览未载入：${message(error)}。请确认文件仍然存在且可读取。`;
       resourceDialog.value = true;
     }
     return false;
@@ -489,7 +480,7 @@ async function edit(field: { sourceNode?: SourceNode; attr: string; node?: Sourc
   if (!document.value || !field.sourceNode) { status.value = '该属性继承自基础载具；请打开基础文件后编辑'; return; }
   const value = (event.target as HTMLInputElement).value; if (document.value.value(field.sourceNode, field.attr) === value) return;
   if (VEC3_ATTRS.has(field.attr) && !isValidVec3(value)) { status.value = `${field.attr} 需要 3 个数字（x y z），已忽略本次输入`; return; }
-  if (NUMBER_ATTRS.has(field.attr) && !isValidNumber(value)) { status.value = `${field.attr} 需要数字，已忽略本次输入`; return; }
+  if ((NUMBER_ATTRS.has(field.attr) || (field.node?.name === 'modifier' && field.attr === 'value')) && !isValidNumber(value)) { status.value = `${field.attr} 需要数字，已忽略本次输入`; return; }
   if (INTEGER_ATTRS.has(field.attr) && !isValidNonNegativeInteger(value)) { status.value = `${field.attr} 需要非负整数，已忽略本次输入`; return; }
   recordUndo(); document.value.set(field.sourceNode, field.attr, value); markDocumentChanged();
   if (field.attr === 'file' && field.node === previewDocument.value?.root) {

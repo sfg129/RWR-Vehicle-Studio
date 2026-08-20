@@ -5,6 +5,7 @@ import { vec3, type Vec3 } from '../math';
 const EMPTY_SCAN = (): ResourceFolderScan => ({ index: {}, duplicates: [], warnings: [] });
 
 export interface FolderSettings { model: string; texture: string; weapon: string }
+export interface SecondaryFolderSettings { model: string[]; texture: string[]; weapon: string[] }
 export interface WeaponShield { offset: Vec3; extent: Vec3 }
 export interface WeaponModel { sourcePath: string; mesh?: string; voxelModel?: string; texture?: string; shields: WeaponShield[] }
 export type ResourceFailureKind = 'missing' | 'read_error' | 'parse_error';
@@ -30,6 +31,7 @@ export function parseWeaponDefinition(source: string, sourcePath: string): Weapo
 
 export class ResourceCatalog {
   folders: FolderSettings = { model: '', texture: '', weapon: '' };
+  secondaryFolders: SecondaryFolderSettings = emptySecondaryFolders();
   indexes: Record<ResourceKind, Record<string, string>> = { model: {}, texture: {}, weapon: {} };
   overrides: Record<string, string> = {};
   private weaponCache = new Map<string, ResourceResult<WeaponModel>>();
@@ -45,24 +47,25 @@ export class ResourceCatalog {
   }
 
   async setFolder(kind: ResourceKind, folder: string): Promise<void> {
-    if (this.scanned && folder === this.folders[kind]) return; // same-path fast path (RV-014)
-    const scan = folder ? await desktop.scanFolder(folder, kind) : EMPTY_SCAN();
-    this.folders[kind] = folder;
-    this.indexes[kind] = scan.index;
-    this.scans[kind] = scan;
-    this.scanned = true;
-    this.weaponCache.clear();
+    await this.applyFolders({ ...this.folders, [kind]: folder }, false, this.secondaryFolders);
   }
-  /** Scan all three folders first, then commit atomically; a failed scan leaves the catalog untouched. Unchanged paths are reused (RV-014). */
-  async applyFolders(folders: FolderSettings, force = false): Promise<ApplyFoldersResult> {
+  /**
+   * Scan all configured source chains before committing atomically. Within each
+   * kind the primary folder wins, followed by secondary folders in UI order.
+   * A failed scan leaves the previous catalog untouched.
+   */
+  async applyFolders(folders: FolderSettings, force = false, secondaryFolders: SecondaryFolderSettings = emptySecondaryFolders()): Promise<ApplyFoldersResult> {
     const generation = ++this.applyGeneration;
     const stale = () => generation !== this.applyGeneration;
     const indexes: Record<ResourceKind, Record<string, string>> = { model: {}, texture: {}, weapon: {} };
     const scans: Record<ResourceKind, ResourceFolderScan> = { model: EMPTY_SCAN(), texture: EMPTY_SCAN(), weapon: EMPTY_SCAN() };
+    const normalizedSecondary = normalizeSecondaryFolders(secondaryFolders);
     let changed = false;
     for (const kind of ['model', 'texture', 'weapon'] as ResourceKind[]) {
-      if (!force && this.scanned && folders[kind] === this.folders[kind]) { indexes[kind] = this.indexes[kind]; scans[kind] = this.scans[kind]; continue; }
-      const scan = folders[kind] ? await desktop.scanFolder(folders[kind], kind) : EMPTY_SCAN();
+      const requestedSources = sourceChain(folders[kind], normalizedSecondary[kind]);
+      const currentSources = sourceChain(this.folders[kind], this.secondaryFolders[kind]);
+      if (!force && this.scanned && sameSources(requestedSources, currentSources)) { indexes[kind] = this.indexes[kind]; scans[kind] = this.scans[kind]; continue; }
+      const scan = await scanSourceChain(kind, requestedSources);
       if (stale()) throw new StaleResourceApplyError();
       indexes[kind] = scan.index;
       scans[kind] = scan;
@@ -70,6 +73,7 @@ export class ResourceCatalog {
     }
     if (stale()) throw new StaleResourceApplyError();
     this.folders = { ...folders };
+    this.secondaryFolders = normalizedSecondary;
     this.indexes = indexes;
     this.scans = scans;
     this.scanned = true;
@@ -80,7 +84,7 @@ export class ResourceCatalog {
   async refreshFolders(): Promise<void> {
     const scans: Record<ResourceKind, ResourceFolderScan> = { model: EMPTY_SCAN(), texture: EMPTY_SCAN(), weapon: EMPTY_SCAN() };
     for (const kind of ['model', 'texture', 'weapon'] as ResourceKind[]) {
-      scans[kind] = this.folders[kind] ? await desktop.scanFolder(this.folders[kind], kind) : EMPTY_SCAN();
+      scans[kind] = await scanSourceChain(kind, sourceChain(this.folders[kind], this.secondaryFolders[kind]));
     }
     this.indexes = { model: scans.model.index, texture: scans.texture.index, weapon: scans.weapon.index };
     this.scans = scans;
@@ -139,6 +143,31 @@ export class ResourceCatalog {
     }
     return [...missing].sort();
   }
+}
+export function emptySecondaryFolders(): SecondaryFolderSettings { return { model: [], texture: [], weapon: [] }; }
+function normalizeSecondaryFolders(value: SecondaryFolderSettings): SecondaryFolderSettings {
+  return {
+    model: sourceChain('', value.model),
+    texture: sourceChain('', value.texture),
+    weapon: sourceChain('', value.weapon),
+  };
+}
+function sourceChain(primary: string, secondary: string[]): string[] {
+  return [primary, ...secondary].filter((path) => typeof path === 'string' && path.trim().length > 0);
+}
+function sameSources(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((path, index) => path === right[index]);
+}
+async function scanSourceChain(kind: ResourceKind, sources: string[]): Promise<ResourceFolderScan> {
+  if (!sources.length) return EMPTY_SCAN();
+  const sourceScans = await Promise.all(sources.map((folder) => desktop.scanFolder(folder, kind)));
+  const merged = EMPTY_SCAN();
+  for (const scan of sourceScans) {
+    for (const [name, path] of Object.entries(scan.index)) if (!Object.hasOwn(merged.index, name)) merged.index[name] = path;
+    merged.duplicates.push(...scan.duplicates);
+    merged.warnings.push(...scan.warnings);
+  }
+  return merged;
 }
 function fail(kind: ResourceFailureKind, message: string): { ok: false; kind: ResourceFailureKind; message: string } { return { ok: false, kind, message }; }
 function describe(e: unknown): string { return e instanceof Error ? e.message : String(e); }

@@ -3,12 +3,13 @@ import { existsSync, readFileSync } from 'node:fs';
 import { SourceDocument } from '../src/core/xml/source-document';
 import { parseWeaponDefinition, ResourceCatalog, StaleResourceApplyError } from '../src/core/resources/resource-catalog';
 import { parseStaticVoxelModel } from '../src/core/voxel/voxel-model';
-import { localDragValue, visualMatchesDamageState, weaponExtentToModel, weaponLogicalToModel, WEAPON_LOGICAL_TO_MODEL_YAW } from '../src/core/vehicle/vehicle-model';
+import { localDragValue, shieldLogicalToModel, SHIELD_LOGICAL_TO_MODEL_YAW, visualMatchesDamageState, weaponExtentToModel, weaponLogicalToModel, WEAPON_LOGICAL_TO_MODEL_YAW } from '../src/core/vehicle/vehicle-model';
 import { composeVehicle } from '../src/core/vehicle/vehicle-composition';
 import { desktop, type ResourceFolderScan } from '../src/platform/desktop-api';
 import { isValidNonNegativeInteger, isValidNumber, isValidVec3 } from '../src/core/math';
 import { SoldierAssets } from '../src/core/soldier/soldier-assets';
 import { loadSoldierAssets } from '../src/core/soldier/soldier-loader';
+import { loadResourcePreferences } from '../src/core/resources/resource-presets';
 
 describe('结构编辑', () => {
   it('增加/删除对象和属性并保留可解析 XML', () => {
@@ -125,6 +126,16 @@ describe('武器预览资源', () => {
     const modelXSize = Math.max(...transformed.map((voxel) => voxel[0])) - Math.min(...transformed.map((voxel) => voxel[0]));
     const modelZSize = Math.max(...transformed.map((voxel) => voxel[2])) - Math.min(...transformed.map((voxel) => voxel[2])); expect(modelZSize).toBeGreaterThan(modelXSize * 4);
   });
+  it.skipIf(!existsSync(`${packageRoot}/models/weapon_boys_mk_i.xml`) || !existsSync(`${packageRoot}/models/weapon_vickers_k_go_no2_mki.xml`))('Boys 与 Vickers K 的 -X 枪口映射到载具 +Z 前方', () => {
+    for (const filename of ['weapon_boys_mk_i.xml', 'weapon_vickers_k_go_no2_mki.xml']) {
+      const voxels = parseStaticVoxelModel(readFileSync(`${packageRoot}/models/${filename}`, 'utf8'));
+      const minX = Math.min(...voxels.map((voxel) => voxel.x));
+      const maxX = Math.max(...voxels.map((voxel) => voxel.x));
+      expect(Math.abs(minX)).toBeGreaterThan(maxX * 3);
+      const muzzle = weaponLogicalToModel([minX, 0, 0]);
+      expect(muzzle[2]).toBeGreaterThan(0);
+    }
+  });
   it.skipIf(!existsSync(`${packageRoot}/weapons/m4_m2.weapon`))('按实际 m4_m2 多 shield 格式增加、修改和删除', () => {
     const text = readFileSync(`${packageRoot}/weapons/m4_m2.weapon`, 'utf8'); const document = new SourceDocument(text);
     expect(document.descendants('shield')).toHaveLength(3);
@@ -134,10 +145,11 @@ describe('武器预览资源', () => {
     document.removeNode(document.descendants('shield')[1]);
     expect(new SourceDocument(document.serialize()).descendants('shield')).toHaveLength(3);
   });
-  it('将 X 前向的武器逻辑 shield 转换到 Z 前向模型坐标', () => {
-    expect(WEAPON_LOGICAL_TO_MODEL_YAW).toBe(-Math.PI / 2);
-    const forward = weaponLogicalToModel([4.6, 0, 0]); expect(forward[0]).toBeCloseTo(0); expect(forward[1]).toBe(0); expect(forward[2]).toBeCloseTo(4.6);
-    const leftPlate = weaponLogicalToModel([0.65, 0.1, 0.5]); expect(leftPlate[0]).toBeCloseTo(-0.5); expect(leftPlate[1]).toBeCloseTo(0.1); expect(leftPlate[2]).toBeCloseTo(0.65);
+  it('分别转换武器体素模型和 shield 的水平坐标', () => {
+    expect(WEAPON_LOGICAL_TO_MODEL_YAW).toBe(Math.PI / 2);
+    const forward = weaponLogicalToModel([-4.6, 0, 0]); expect(forward[0]).toBeCloseTo(0); expect(forward[1]).toBe(0); expect(forward[2]).toBeCloseTo(4.6);
+    expect(SHIELD_LOGICAL_TO_MODEL_YAW).toBe(Math.PI / 2);
+    const rightFrontShield = shieldLogicalToModel([0.65, 0.1, 0.5]); expect(rightFrontShield[0]).toBeCloseTo(0.5); expect(rightFrontShield[1]).toBeCloseTo(0.1); expect(rightFrontShield[2]).toBeCloseTo(-0.65);
     expect(weaponExtentToModel([0.3, 0.9, 1.2])).toEqual([1.2, 0.9, 0.3]);
   });
 });
@@ -212,6 +224,22 @@ describe('武器解析错误分类（RV-022）', () => {
 });
 
 describe('资源目录事务（RV-011）', () => {
+  it('主来源优先，缺失资源按次要来源编号顺序回退', async () => {
+    const scan = vi.spyOn(desktop, 'scanFolder').mockImplementation(async (path: string): Promise<ResourceFolderScan> => {
+      if (path === 'main') return { index: { 'shared.mesh': 'main/shared.mesh', 'main.mesh': 'main/main.mesh' }, duplicates: [], warnings: [] };
+      if (path === 'dlc') return { index: { 'shared.mesh': 'dlc/shared.mesh', 'dlc.mesh': 'dlc/dlc.mesh' }, duplicates: [], warnings: [] };
+      return { index: { 'dlc.mesh': 'mod/dlc.mesh', 'mod.mesh': 'mod/mod.mesh' }, duplicates: [], warnings: [] };
+    });
+    try {
+      const catalog = new ResourceCatalog();
+      await catalog.applyFolders({ model: 'main', texture: '', weapon: '' }, false, { model: ['dlc', '', 'mod'], texture: [], weapon: [] });
+      expect(catalog.resolve('shared.mesh', 'model')).toBe('main/shared.mesh');
+      expect(catalog.resolve('dlc.mesh', 'model')).toBe('dlc/dlc.mesh');
+      expect(catalog.resolve('mod.mesh', 'model')).toBe('mod/mod.mesh');
+      expect(catalog.secondaryFolders.model).toEqual(['dlc', 'mod']);
+    } finally { scan.mockRestore(); }
+  });
+
   it('applyFolders 任一目录扫描失败时保持旧状态不变', async () => {
     const scan = vi.spyOn(desktop, 'scanFolder').mockImplementation(async (path: string, kind: string) => {
       if (kind === 'weapon') throw new Error('weapon scan failed');
@@ -255,6 +283,24 @@ describe('资源目录事务（RV-011）', () => {
   });
 });
 
+describe('多来源资源预设兼容', () => {
+  it('旧版预设缺少 secondaryFolders 时自动迁移为空来源链', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => JSON.stringify({
+        activePresetId: 'legacy',
+        presets: [{ id: 'legacy', name: '旧预设', folders: { model: 'm', texture: 't', weapon: 'w' }, supportModel: 'model.xml', supportAnimations: 'animations.xml' }],
+        lastSelection: { folders: { model: 'm', texture: 't', weapon: 'w' }, supportModel: 'model.xml', supportAnimations: 'animations.xml' },
+      }),
+      setItem: vi.fn(),
+    });
+    try {
+      const preferences = loadResourcePreferences();
+      expect(preferences.presets[0].secondaryFolders).toEqual({ model: [], texture: [], weapon: [] });
+      expect(preferences.lastSelection?.secondaryFolders).toEqual({ model: [], texture: [], weapon: [] });
+    } finally { vi.unstubAllGlobals(); }
+  });
+});
+
 describe('资源扫描诊断（RV-019 / RV-057）', () => {
   it('applyFolders 聚合重复文件与扫描警告到 scanDiagnostics', async () => {
     const scan = vi.spyOn(desktop, 'scanFolder').mockImplementation(async (path: string, kind: string): Promise<ResourceFolderScan> => {
@@ -280,6 +326,22 @@ describe('资源扫描诊断（RV-019 / RV-057）', () => {
 });
 
 describe('资源目录 same-path 快路径（RV-014）', () => {
+  it('次要来源顺序未变时复用索引，增删或换序时重新扫描', async () => {
+    let calls = 0;
+    const scan = vi.spyOn(desktop, 'scanFolder').mockImplementation(async (path: string) => { calls++; return { index: { [`${path}.mesh`]: path }, duplicates: [], warnings: [] }; });
+    try {
+      const catalog = new ResourceCatalog();
+      const secondary = { model: ['dlc', 'mod'], texture: [], weapon: [] };
+      await catalog.applyFolders({ model: 'main', texture: '', weapon: '' }, false, secondary);
+      expect(calls).toBe(3);
+      await catalog.applyFolders({ model: 'main', texture: '', weapon: '' }, false, secondary);
+      expect(calls).toBe(3);
+      await catalog.applyFolders({ model: 'main', texture: '', weapon: '' }, false, { ...secondary, model: ['mod', 'dlc'] });
+      expect(calls).toBe(6);
+      expect(catalog.resolve('mod.mesh', 'model')).toBe('mod');
+    } finally { scan.mockRestore(); }
+  });
+
   it('路径未变时 applyFolders 不再重扫；force=true 或 refreshFolders 强制重扫', async () => {
     let calls = 0;
     const scan = vi.spyOn(desktop, 'scanFolder').mockImplementation(async (path: string) => { calls++; return { index: { [`${path}-file`]: path }, duplicates: [], warnings: [] }; });

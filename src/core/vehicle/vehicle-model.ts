@@ -12,15 +12,18 @@ export function sceneEntries(doc: SourceDocument): SceneEntry[] {
   const root = doc.root; if (!root || root.name !== 'vehicle') throw new Error('根元素不是 <vehicle>');
   const result: SceneEntry[] = [];
   const types: [string, SceneEntry['kind'], string][] = [
-    ['physics', 'physics', '物理 / 碰撞'], ['control', 'control', '操控'], ['tire_set', 'tire', '轮组'],
+    ['physics', 'physics', '物理 / 碰撞'], ['modifier', 'physics', '物理修正'], ['control', 'control', '操控'], ['tire_set', 'tire', '轮组'],
     ['turret', 'turret', '炮塔'], ['visual', 'visual', '外观'], ['character_slot', 'slot', '乘员'],
   ];
+  const kindCounts: Record<SceneEntry['kind'], number> = { visual: 0, turret: 0, slot: 0, physics: 0, control: 0, tire: 0, other: 0 };
   for (const [tag, kind, title] of types) {
     const nodes = root.children.filter((n) => n.name === tag);
-    nodes.forEach((node, index) => {
-      const a = doc.attrs(node); const detail = kind === 'visual' ? `${a.class ?? 'visual'} · ${a.mesh_filename || '无模型'}`
-        : kind === 'turret' ? a.weapon_key || '无武器' : kind === 'slot' ? a.type || 'unknown' : '';
-      result.push({ node, kind, index, label: `${title}${nodes.length > 1 ? ` ${index}` : ''}${detail ? ` · ${detail}` : ''}` });
+    nodes.forEach((node, localIndex) => {
+      const index = kindCounts[kind]++;
+      const a = doc.attrs(node); const detail = tag === 'modifier' ? a.class || '未指定 class'
+        : kind === 'visual' ? `${a.class ?? 'visual'} · ${a.mesh_filename || '无模型'}`
+          : kind === 'turret' ? a.weapon_key || '无武器' : kind === 'slot' ? a.type || 'unknown' : '';
+      result.push({ node, kind, index, label: `${title}${nodes.length > 1 ? ` ${localIndex}` : ''}${detail ? ` · ${detail}` : ''}` });
     });
   }
   const recognized = new Set(types.map(([tag]) => tag));
@@ -147,9 +150,16 @@ export function dragNeedsRebuild(node: SourceNode): boolean {
   return node.name === 'turret';
 }
 
-/** RWR weapon collision data is X-forward, while OGRE weapon models are Z-forward. */
-export const WEAPON_LOGICAL_TO_MODEL_YAW = -Math.PI / 2;
+/** Static voxel weapons point toward -X; vehicle-mounted weapons point toward +Z. */
+export const WEAPON_LOGICAL_TO_MODEL_YAW = Math.PI / 2;
 export function weaponLogicalToModel(value: Vec3): Vec3 { return rotateY(value, WEAPON_LOGICAL_TO_MODEL_YAW); }
+
+/**
+ * Game-side verification maps shield right/front to model right/front by
+ * rotating the shield frame +90 degrees around Y.
+ */
+export const SHIELD_LOGICAL_TO_MODEL_YAW = Math.PI / 2;
+export function shieldLogicalToModel(value: Vec3): Vec3 { return rotateY(value, SHIELD_LOGICAL_TO_MODEL_YAW); }
 export function weaponExtentToModel(value: Vec3): Vec3 { return [Math.abs(value[2]), Math.abs(value[1]), Math.abs(value[0])]; }
 
 function integerIndex(value: string | undefined): number | null {

@@ -7,7 +7,7 @@ import { DDSLoader } from 'three/examples/jsm/loaders/DDSLoader.js';
 import { TGALoader } from 'three/examples/jsm/loaders/TGALoader.js';
 import type { SourceDocument, SourceNode } from '../core/xml/source-document';
 import type { ResourceCatalog } from '../core/resources/resource-catalog';
-import { characterSlotHidden, characterSlotPose, dragNeedsRebuild, editableBasisRotation, idleState, localDragValue, rotateY, tireVisualPosition, turretWorldPose, visualMatchesDamageState, WEAPON_LOGICAL_TO_MODEL_YAW } from '../core/vehicle/vehicle-model';
+import { characterSlotHidden, characterSlotPose, dragNeedsRebuild, editableBasisRotation, idleState, localDragValue, rotateY, SHIELD_LOGICAL_TO_MODEL_YAW, tireVisualPosition, turretWorldPose, visualMatchesDamageState, WEAPON_LOGICAL_TO_MODEL_YAW } from '../core/vehicle/vehicle-model';
 import { vec3, type Vec3 } from '../core/math';
 import { SoldierAssets, SOLDIER_GAME_SCALE, rwrLinearToDisplay, type SoldierAnimation } from '../core/soldier/soldier-assets';
 import { parseStaticVoxelModel, type StaticVoxel } from '../core/voxel/voxel-model';
@@ -226,7 +226,7 @@ export class SceneController {
         if (path) { const voxels = await this.loadVoxels(path); if (generation !== this.sceneGeneration) return; const object = this.buildVoxelModel(voxels); object.position.set(...weaponOffset); object.rotation.y = WEAPON_LOGICAL_TO_MODEL_YAW; group.add(object); }
       }
       if (this.options?.showShields) {
-        const shieldFrame = new THREE.Group(); shieldFrame.position.set(...weaponOffset); shieldFrame.rotation.y = WEAPON_LOGICAL_TO_MODEL_YAW;
+        const shieldFrame = new THREE.Group(); shieldFrame.position.set(...weaponOffset); shieldFrame.rotation.y = SHIELD_LOGICAL_TO_MODEL_YAW;
         for (const shield of weapon.shields) {
           if (!shield.extent.some((value) => Math.abs(value) > 0)) continue;
           const geometry = new THREE.BoxGeometry(Math.abs(shield.extent[0]), Math.abs(shield.extent[1]), Math.abs(shield.extent[2]));
