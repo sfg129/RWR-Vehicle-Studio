@@ -6,39 +6,40 @@ function workflow(name: string): string {
   return readFileSync(join(process.cwd(), '.github', 'workflows', name), 'utf8');
 }
 
-describe('nightly publish workflow', () => {
-  it('只在 CI 成功且 main 分支时触发，并有 nightly concurrency', () => {
+describe('formal release workflow', () => {
+  it('仅由维护者手动指定已有版本 tag，不监听 main 或 CI', () => {
     const publish = workflow('publish.yml');
-    expect(publish).toContain('workflow_run:');
-    expect(publish).toContain('workflows: ["CI"]');
-    expect(publish).toContain("github.event.workflow_run.conclusion == 'success'");
-    expect(publish).toContain("github.event.workflow_run.head_branch == 'main'");
-    expect(publish).toContain("github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'");
-    expect(publish).toContain('group: nightly-publish');
-    expect(publish).toContain('cancel-in-progress: true');
+    expect(publish).toContain('workflow_dispatch:');
+    expect(publish).toContain('tag:');
+    expect(publish).toContain('ref: refs/tags/${{ inputs.tag }}');
+    expect(publish).toContain('group: release-${{ inputs.tag }}');
+    expect(publish).not.toContain('workflow_run:');
+    expect(publish).not.toContain('nightly');
   });
 
-  it('使用 build matrix -> artifacts -> finalize-release', () => {
+  it('使用三平台 build matrix，并在全部成功后统一上传正式 Release', () => {
     const publish = workflow('publish.yml');
-    expect(publish).toContain('build-tauri:');
+    expect(publish).toContain('macos-latest');
+    expect(publish).toContain('ubuntu-22.04');
+    expect(publish).toContain('windows-latest');
     expect(publish).toContain('finalize-release:');
     expect(publish).toContain('needs: build-tauri');
     expect(publish).toContain('actions/upload-artifact@v4');
     expect(publish).toContain('actions/download-artifact@v4');
-    expect(publish).toContain('if-no-files-found: error');
+    expect(publish).toContain('gh release upload "$RELEASE_TAG"');
+    expect(publish).toContain('--clobber');
   });
 
-  it('finalize 负责 retarget nightly 并用 gh clobber 上传', () => {
+  it('Windows 同时打包 NSIS 与 portable EXE', () => {
     const publish = workflow('publish.yml');
-    expect(publish).toContain('git tag -f nightly "$HEAD_SHA"');
-    expect(publish).toContain('git push -f origin refs/tags/nightly');
-    expect(publish).toContain('gh release upload nightly');
-    expect(publish).toContain('--clobber');
+    expect(publish).toContain('bundle/nsis/*.exe');
+    expect(publish).toContain('rwr-vehicle-studio.exe');
+    expect(publish).toContain('RWR-Vehicle-Studio-$version-x64-setup.exe');
+    expect(publish).toContain('RWR-Vehicle-Studio-$version-portable.exe');
   });
 
   it('Linux 依赖与 Bun 版本正确', () => {
     const publish = workflow('publish.yml');
-    expect(publish).toContain('ubuntu-22.04');
     expect(publish).toContain('libwebkit2gtk-4.1-dev');
     expect(publish).toContain('libxdo-dev');
     expect(publish).toContain('libssl-dev');
@@ -50,27 +51,14 @@ describe('nightly publish workflow', () => {
     expect(publish).toContain('bun-version: 1.3.14');
   });
 
-  it('release 不直接使用 tauri-action tagName，也不使用 dev 版本', () => {
+  it('使用稳定 tauri-action 并为 macOS/Linux 生成规定资产', () => {
     const publish = workflow('publish.yml');
     expect(publish).toContain('tauri-apps/tauri-action@v1.0.0');
     expect(publish).not.toContain('tauri-apps/tauri-action@dev');
-    expect(publish).not.toContain('tagName: nightly');
-  });
-
-  it('release artifact 不递归上传 macOS app bundle 内容', () => {
-    const publish = workflow('publish.yml');
     expect(publish).toContain('ditto -c -k');
-    expect(publish).toContain('.app.zip');
-    expect(publish).toContain('bundle/dmg/*.dmg');
-    expect(publish).toContain('bundle/appimage/*.AppImage');
-    expect(publish).toContain('bundle/deb/*.deb');
-    expect(publish).toContain('bundle/nsis/*.exe');
-    expect(publish).not.toContain('path: src-tauri/target/**/release/bundle/**');
-  });
-
-  it('stale CI 结果不能覆盖当前 main nightly', () => {
-    const publish = workflow('publish.yml');
-    expect(publish).toContain('git rev-parse origin/main');
-    expect(publish).toContain('should_publish');
+    expect(publish).toContain('macos-universal.app.zip');
+    expect(publish).toContain('macos-universal.dmg');
+    expect(publish).toContain('linux-x64.AppImage');
+    expect(publish).toContain('linux-x64.deb');
   });
 });

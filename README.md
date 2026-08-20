@@ -20,13 +20,13 @@ RWR Vehicle Studio 是面向 _Running With Rifles_ 模组工作流的离线载�
 - **Tauri 2 + Rust**：原生窗口、文件对话框、递归目录扫描和受控文件保存；
 - **Vitest + Rust tests**：XML 继承、资源匹配、坐标映射和桌面命令回归测试。
 
-## 下载
+## 正式发布资产
 
-每次推送到 `main` 都会由 CI 自动构建并发布到 [Releases](https://github.com/sfg129/RWR-Vehicle-Studio/releases) 的滚动 **nightly** 预发布条目（每次提交覆盖刷新）：
+正式版本在 [Releases](https://github.com/sfg129/RWR-Vehicle-Studio/releases) 提供以下三平台产物：
 
-- Windows：NSIS 安装程序（`.exe`）；
+- Windows：NSIS 安装程序（`.exe`）与便携版（portable `.exe`）；
 - macOS：磁盘映像（`.dmg`）与便携版（`.app.zip`）；
-- Linux：Debian 包（`.deb`）与便携 `.appimage`。
+- Linux：Debian 包（`.deb`）与便携版（`.AppImage`）。
 
 ## 开发与构建
 
