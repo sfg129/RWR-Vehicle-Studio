@@ -26,6 +26,7 @@ describe('formal release workflow', () => {
     expect(publish).toContain('needs: build-tauri');
     expect(publish).toContain('actions/upload-artifact@v4');
     expect(publish).toContain('actions/download-artifact@v4');
+    expect(publish).toContain('GH_REPO: ${{ github.repository }}');
     expect(publish).toContain('gh release upload "$RELEASE_TAG"');
     expect(publish).toContain('--clobber');
   });

@@ -126,6 +126,7 @@ jobs:
       contents: write
     env:
       RELEASE_TAG: ${{ inputs.tag }}
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: download all release artifacts
         uses: actions/download-artifact@v4
