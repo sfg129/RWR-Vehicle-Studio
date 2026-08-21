@@ -6,6 +6,7 @@ export interface SceneEntry {
   kind: 'visual' | 'turret' | 'slot' | 'physics' | 'control' | 'tire' | 'other';
   label: string;
   index: number;
+  meta?: string;
 }
 
 export function sceneEntries(doc: SourceDocument): SceneEntry[] {
@@ -23,7 +24,10 @@ export function sceneEntries(doc: SourceDocument): SceneEntry[] {
       const a = doc.attrs(node); const detail = tag === 'modifier' ? a.class || '未指定 class'
         : kind === 'visual' ? `${a.class ?? 'visual'} · ${a.mesh_filename || '无模型'}`
           : kind === 'turret' ? a.weapon_key || '无武器' : kind === 'slot' ? a.type || 'unknown' : '';
-      result.push({ node, kind, index, label: `${title}${nodes.length > 1 ? ` ${localIndex}` : ''}${detail ? ` · ${detail}` : ''}` });
+      const controlledTurrets = kind === 'slot' && a.type === 'gunner'
+        ? node.children.filter((child) => child.name === 'turret').map((child) => doc.value(child, 'index')).filter((value): value is string => value !== undefined && value.trim() !== '')
+        : [];
+      result.push({ node, kind, index, label: `${title}${nodes.length > 1 ? ` ${localIndex}` : ''}${detail ? ` · ${detail}` : ''}`, meta: controlledTurrets.length ? `index ${controlledTurrets.join(', ')}` : undefined });
     });
   }
   const recognized = new Set(types.map(([tag]) => tag));
@@ -52,6 +56,27 @@ export function idleState(doc: SourceDocument, slot: SourceNode): SourceNode | u
   return slot.children.find((n) => n.name === 'state' && doc.value(n, 'class') === 'idle');
 }
 
+export interface CharacterSlotPositionItem {
+  key: 'position' | 'entering' | 'leaving' | 'idle';
+  label: string;
+  guide?: 'entrance' | 'leaving';
+}
+
+/** Build the expandable scene-tree rows that correspond to actually selectable crew guides. */
+export function characterSlotPositionItems(doc: SourceDocument, slot: SourceNode): CharacterSlotPositionItem[] {
+  const states = slot.children.filter((node) => node.name === 'state');
+  const state = (name: string) => states.find((node) => doc.value(node, 'class') === name);
+  const result: CharacterSlotPositionItem[] = [];
+  const legacyPosition = doc.value(slot, 'enter_position') !== undefined || doc.value(slot, 'exit_rotation') !== undefined;
+  const entering = state('entering'); const leaving = state('leaving'); const idle = state('idle');
+  if (legacyPosition) result.push({ key: 'position', label: 'position', guide: 'entrance' });
+  else if (entering && (doc.value(entering, 'position') !== undefined || doc.value(entering, 'rotation') !== undefined)) result.push({ key: 'entering', label: 'entering', guide: 'entrance' });
+  if (leaving && doc.value(leaving, 'position') !== undefined) result.push({ key: 'leaving', label: 'leaving', guide: 'leaving' });
+  if (idle) result.push({ key: 'idle', label: 'idle' });
+  if (result.length === 1 && result[0].guide) result[0].label = 'position';
+  return result;
+}
+
 export function characterSlotHidden(doc: SourceDocument, slot: SourceNode): boolean {
   return slot.name === 'character_slot' && doc.value(slot, 'hiding') === '1';
 }
@@ -64,6 +89,29 @@ export interface TurretPose {
 export interface CharacterSlotPose extends TurretPose {
   attachmentIndex: number | null;
   attachmentRotation: number;
+}
+
+export interface CharacterEntranceRotation {
+  /** XML node/attribute that owns the editable angle. */
+  node: SourceNode;
+  attr: 'rotation' | 'exit_rotation';
+  /** Vehicle-space exit direction in radians. */
+  worldRotation: number;
+  /** Rotation inherited from an attached turret. */
+  basisRotation: number;
+  /** Convert a dragged vehicle-space exit angle back to the XML value. */
+  toXmlRotation: (worldRotation: number) => number;
+}
+
+export type CharacterEntranceEdit =
+  | { kind: 'position'; node: SourceNode; attr: 'enter_position' | 'position'; value: Vec3 }
+  | { kind: 'rotation'; rotation: CharacterEntranceRotation };
+
+export interface CharacterStatePlacement {
+  node: SourceNode;
+  value: Vec3;
+  /** Vehicle-space facing direction. The position itself remains an explicit vehicle-space coordinate. */
+  worldRotation: number;
 }
 
 /** Resolve a turret's vehicle-space pose, including parent_turret_index chains. */
@@ -106,6 +154,61 @@ export function characterSlotPose(doc: SourceDocument, slot: SourceNode, turrets
     rotation: turret.rotation + localRotation,
     attachmentIndex,
     attachmentRotation: turret.rotation,
+  };
+}
+
+/**
+ * Locate the angle used to draw/edit a crew member's way out of the vehicle.
+ * Old vehicle files keep it on character_slot.exit_rotation.  The alternate
+ * state form stores the facing direction while entering, so its outward
+ * direction is the opposite angle.
+ */
+export function characterEntranceRotation(doc: SourceDocument, slot: SourceNode, turrets: SourceNode[]): CharacterEntranceRotation | null {
+  const pose = characterSlotPose(doc, slot, turrets);
+  const entering = slot.children.find((node) => node.name === 'state' && doc.value(node, 'class') === 'entering' && doc.value(node, 'rotation') !== undefined);
+  if (entering) {
+    const local = finiteNumber(doc.value(entering, 'rotation'));
+    return {
+      node: entering,
+      attr: 'rotation',
+      basisRotation: pose.attachmentRotation,
+      worldRotation: pose.attachmentRotation + local + Math.PI,
+      toXmlRotation: (worldRotation) => normalizeRadians(worldRotation - pose.attachmentRotation - Math.PI),
+    };
+  }
+  if (doc.value(slot, 'exit_rotation') === undefined) return null;
+  const local = finiteNumber(doc.value(slot, 'exit_rotation'));
+  return {
+    node: slot,
+    attr: 'exit_rotation',
+    basisRotation: pose.attachmentRotation,
+    worldRotation: pose.attachmentRotation + local,
+    toXmlRotation: (worldRotation) => normalizeRadians(worldRotation - pose.attachmentRotation),
+  };
+}
+
+/**
+ * Explicit entry destinations take priority over inferred directions. Both the
+ * legacy enter_position and state/entering.position are vehicle-space values.
+ */
+export function characterEntranceEdit(doc: SourceDocument, slot: SourceNode, turrets: SourceNode[]): CharacterEntranceEdit | null {
+  const explicit = doc.value(slot, 'enter_position');
+  if (explicit !== undefined) return { kind: 'position', node: slot, attr: 'enter_position', value: vec3(explicit) };
+  const entering = characterStatePlacement(doc, slot, 'entering', turrets);
+  if (entering) return { kind: 'position', node: entering.node, attr: 'position', value: entering.value };
+  const rotation = characterEntranceRotation(doc, slot, turrets);
+  return rotation ? { kind: 'rotation', rotation } : null;
+}
+
+/** Resolve an explicit state position plus its facing direction. State positions are vehicle-space. */
+export function characterStatePlacement(doc: SourceDocument, slot: SourceNode, stateClass: string, turrets: SourceNode[]): CharacterStatePlacement | null {
+  const state = slot.children.find((node) => node.name === 'state' && doc.value(node, 'class') === stateClass);
+  if (!state || doc.value(state, 'position') === undefined) return null;
+  const pose = characterSlotPose(doc, slot, turrets);
+  return {
+    node: state,
+    value: vec3(doc.value(state, 'position')),
+    worldRotation: pose.attachmentRotation + finiteNumber(doc.value(state, 'rotation')),
   };
 }
 
@@ -171,6 +274,13 @@ function integerIndex(value: string | undefined): number | null {
 function finiteNumber(value: string | undefined): number {
   const number = Number(value ?? 0);
   return Number.isFinite(number) ? number : 0;
+}
+
+export function normalizeRadians(value: number): number {
+  const tau = Math.PI * 2;
+  let result = (value + Math.PI) % tau;
+  if (result < 0) result += tau;
+  return result - Math.PI;
 }
 
 /** RWR tire visuals use two indexes per tire_set: even = +X, odd = -X. */

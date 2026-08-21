@@ -7,14 +7,19 @@ import { DDSLoader } from 'three/examples/jsm/loaders/DDSLoader.js';
 import { TGALoader } from 'three/examples/jsm/loaders/TGALoader.js';
 import type { SourceDocument, SourceNode } from '../core/xml/source-document';
 import type { ResourceCatalog } from '../core/resources/resource-catalog';
-import { characterSlotHidden, characterSlotPose, dragNeedsRebuild, editableBasisRotation, idleState, localDragValue, rotateY, SHIELD_LOGICAL_TO_MODEL_YAW, tireVisualPosition, turretWorldPose, visualMatchesDamageState, WEAPON_LOGICAL_TO_MODEL_YAW } from '../core/vehicle/vehicle-model';
+import { characterEntranceEdit, characterSlotHidden, characterSlotPose, characterStatePlacement, dragNeedsRebuild, editableBasisRotation, idleState, localDragValue, rotateY, SHIELD_LOGICAL_TO_MODEL_YAW, tireVisualPosition, turretWorldPose, visualMatchesDamageState, WEAPON_LOGICAL_TO_MODEL_YAW } from '../core/vehicle/vehicle-model';
 import { vec3, type Vec3 } from '../core/math';
 import { SoldierAssets, SOLDIER_GAME_SCALE, rwrLinearToDisplay, type SoldierAnimation } from '../core/soldier/soldier-assets';
 import { parseStaticVoxelModel, type StaticVoxel } from '../core/voxel/voxel-model';
 
-export interface ViewOptions { showBroken: boolean; showOccupants: boolean; showBounds: boolean; showShields: boolean; animate: boolean }
+export type CrewGuideKind = 'entrance' | 'leaving';
+export interface ViewOptions { showBroken: boolean; showOccupants: boolean; showOccupantPositions: boolean; showVisualBounds: boolean; showBounds: boolean; showShields: boolean; showEntrances: boolean; animate: boolean }
 interface Occupant { mesh: THREE.InstancedMesh; animation?: SoldierAnimation; assets: SoldierAssets; pose: Float32Array; dynamic: boolean }
-interface DragInfo { node: SourceNode; attr: string; value: Vec3; start: THREE.Vector3; basisRotation: number }
+interface PositionDrag { kind: 'position'; node: SourceNode; attr: string; value: Vec3; start: THREE.Vector3; basisRotation: number }
+type EntranceEdit = { kind: 'position'; node: SourceNode; attr: 'enter_position' | 'position'; value: Vec3 } | { kind: 'rotation'; node: SourceNode; attr: 'rotation' | 'exit_rotation'; toXmlRotation: (worldRotation: number) => number };
+interface EntranceDrag { kind: 'entrance'; edit: EntranceEdit; anchor: THREE.Vector3; handle: THREE.Mesh; guideGeometry: THREE.BufferGeometry }
+type DragInfo = PositionDrag | EntranceDrag;
+interface EntranceGuide { handle: THREE.Mesh; guideGeometry: THREE.BufferGeometry; edit: EntranceEdit; anchor: THREE.Vector3 }
 
 const ASSET_CONCURRENCY = 6;
 /** Run an async task over items with a bounded number of in-flight workers (RV-027). */
@@ -33,7 +38,7 @@ export class SceneController {
   private doc?: SourceDocument; private catalog?: ResourceCatalog; private soldier?: SoldierAssets; private options?: ViewOptions;
   private meshCache = new Map<string, Promise<OgreMesh>>(); private textureCache = new Map<string, Promise<THREE.Texture>>(); private voxelCache = new Map<string, Promise<StaticVoxel[]>>(); private resolvedTextures = new Set<THREE.Texture>(); private resolvedTexturePaths = new Map<THREE.Texture, string>();
   private geometryCache = new Map<string, THREE.BufferGeometry>(); private sharedAssets = new Set<THREE.BufferGeometry | THREE.Material>();
-  private nodeObjects = new Map<number, THREE.Object3D>(); private occupants: Occupant[] = []; private startTime = performance.now();
+  private nodeObjects = new Map<number, THREE.Object3D>(); private entranceGuides = new Map<string, EntranceGuide>(); private visualObjects: THREE.Object3D[] = []; private occupants: Occupant[] = []; private startTime = performance.now();
   private sceneGeneration = 0;
   private pickTargets: THREE.Object3D[] = []; private raycaster = new THREE.Raycaster(); private pointer = new THREE.Vector2(); private frame = 0;
   private lastAnimationUpdate = -Infinity; private readonly animationIntervalMs = 50;
@@ -41,7 +46,8 @@ export class SceneController {
   private resizeObserver?: ResizeObserver; private disposed = false;
   private fpsFrames = 0; private fpsStarted = performance.now();
 
-  constructor(private host: HTMLElement, private onSelect: (id: number) => void, private onMove: (node: SourceNode, attr: string, value: Vec3, needsRebuild: boolean) => void,
+  constructor(private host: HTMLElement, private onSelect: (id: number, guide?: CrewGuideKind) => void, private onMove: (node: SourceNode, attr: string, value: Vec3, needsRebuild: boolean) => void,
+    private onRotate: (node: SourceNode, attr: 'rotation' | 'exit_rotation', value: number) => void,
     private onStats: (fps: number, dynamicOccupants: number) => void, private onDiagnostic: (message: string) => void = () => {}) {
     this.scene.background = new THREE.Color(0x0d1115); this.scene.fog = new THREE.Fog(0x0d1115, 80, 250);
     this.camera.position.set(16, 11, 18);
@@ -53,9 +59,27 @@ export class SceneController {
     this.transform = new TransformControls(this.camera, this.renderer.domElement); this.transform.setMode('translate'); this.transform.setSize(0.75);
     this.scene.add(this.transform.getHelper()); this.scene.add(this.root);
     this.transform.addEventListener('dragging-changed', (e: any) => { this.controls.enabled = !e.value; });
-    this.transform.addEventListener('mouseDown', () => { if (this.drag) this.drag.start.copy(this.proxy.position); });
+    this.transform.addEventListener('mouseDown', () => { if (this.drag?.kind === 'position') this.drag.start.copy(this.proxy.position); });
+    this.transform.addEventListener('objectChange', () => {
+      if (this.drag?.kind !== 'entrance') return;
+      const y = this.drag.handle.position.y; this.proxy.position.y = y; this.drag.handle.position.set(this.proxy.position.x, y, this.proxy.position.z);
+      const positions = this.drag.guideGeometry.getAttribute('position') as THREE.BufferAttribute;
+      positions.setXYZ(1, this.proxy.position.x, this.drag.anchor.y, this.proxy.position.z);
+      positions.setXYZ(2, this.proxy.position.x, this.drag.anchor.y, this.proxy.position.z);
+      positions.setXYZ(3, this.proxy.position.x, y, this.proxy.position.z); positions.needsUpdate = true;
+    });
     this.transform.addEventListener('mouseUp', () => {
       if (!this.drag) return;
+      if (this.drag.kind === 'entrance') {
+        const delta = this.proxy.position.clone().sub(this.drag.anchor); delta.y = 0;
+        if (this.drag.edit.kind === 'position') {
+          const original = this.drag.edit.value;
+          this.onMove(this.drag.edit.node, this.drag.edit.attr, [this.proxy.position.x, original[1], this.proxy.position.z], true);
+        } else if (delta.lengthSq() > 0.0025) {
+          this.onRotate(this.drag.edit.node, this.drag.edit.attr, this.drag.edit.toXmlRotation(Math.atan2(delta.x, delta.z)));
+        }
+        return;
+      }
       const worldDelta = this.proxy.position.clone().sub(this.drag.start);
       const value = localDragValue([worldDelta.x, worldDelta.y, worldDelta.z], this.drag.basisRotation, this.drag.value);
       // RV-025: when the dragged node has a direct scene object, move it in place and skip the full rebuild.
@@ -116,12 +140,20 @@ export class SceneController {
           }
         }
         if (generation !== this.sceneGeneration) return;
-        object.position.set(...origin); object.userData.nodeId = visual.id; object.traverse((o) => o.userData.nodeId = visual.id); this.root.add(object); this.pickTargets.push(object); this.nodeObjects.set(visual.id, object);
+        object.position.set(...origin); object.userData.nodeId = visual.id; object.traverse((o) => o.userData.nodeId = visual.id); this.root.add(object); if (options.showVisualBounds) this.pickTargets.push(object); this.nodeObjects.set(visual.id, object); this.visualObjects.push(object);
       } catch (error) { if (generation === this.sceneGeneration) { console.warn(`模型加载失败：${a.mesh_filename}`, error); this.onDiagnostic(`模型加载失败：${a.mesh_filename}`); } }
     });
     await mapLimit(turrets.map((turret, index) => ({ turret, index })), ASSET_CONCURRENCY, ({ turret, index }) => this.addWeapon(turret, index, globalOffset, generation));
     if (options.showBounds && physics) this.addBounds(physics);
     if (options.showOccupants && soldier) for (const slot of root.children.filter((n) => n.name === 'character_slot')) this.addOccupant(slot, turrets);
+    if (options.showOccupantPositions) for (const slot of root.children.filter((n) => n.name === 'character_slot')) this.addOccupantPositionMarker(slot, turrets);
+    if (options.showEntrances) {
+      const vehicleBounds = this.visibleVehicleBounds();
+      for (const slot of root.children.filter((n) => n.name === 'character_slot')) {
+        this.addEntranceGuide(slot, turrets, vehicleBounds);
+        this.addLeavingGuide(slot, turrets);
+      }
+    }
     if (generation === this.sceneGeneration) this.enforceAssetLimits();
   }
 
@@ -149,15 +181,25 @@ export class SceneController {
     this.geometryCache.clear();
   }
 
-  select(node?: SourceNode): void {
+  select(node?: SourceNode, guideKind?: CrewGuideKind): void {
     this.transform.detach(); this.drag = undefined; if (this.selectedHelper) { this.root.remove(this.selectedHelper); this.selectedHelper.dispose(); this.selectedHelper = undefined; }
     if (!node || !this.doc) return;
-    const object = this.nodeObjects.get(node.id); if (object) { this.selectedHelper = new THREE.BoxHelper(object, 0xf0b84b); this.root.add(this.selectedHelper); }
+    if (guideKind) {
+      const guide = this.entranceGuides.get(crewGuideKey(node.id, guideKind)); if (!guide) return;
+      this.selectedHelper = new THREE.BoxHelper(guide.handle, 0xffd36a); this.root.add(this.selectedHelper);
+      this.proxy.position.copy(guide.handle.position); this.scene.add(this.proxy); this.transform.showX = true; this.transform.showY = false; this.transform.showZ = true; this.transform.attach(this.proxy);
+      this.drag = { kind: 'entrance', edit: guide.edit, anchor: guide.anchor.clone(), handle: guide.handle, guideGeometry: guide.guideGeometry };
+      return;
+    }
+    this.transform.showX = true; this.transform.showY = true; this.transform.showZ = true;
+    const appearanceInteractionDisabled = (node.name === 'visual' || node.name === 'turret') && this.options?.showVisualBounds === false;
+    const object = this.nodeObjects.get(node.id); if (object && !appearanceInteractionDisabled) { this.selectedHelper = new THREE.BoxHelper(object, 0xf0b84b); this.root.add(this.selectedHelper); }
+    if (appearanceInteractionDisabled) return;
     const target = editablePosition(this.doc, node); if (!target) return;
     const world = object?.position.clone() ?? new THREE.Vector3(...target.value);
     this.proxy.position.copy(world); this.scene.add(this.proxy); this.transform.attach(this.proxy);
     const basisRotation = editableBasisRotation(this.doc, node);
-    this.drag = { node: target.node, attr: target.attr, value: target.value, start: world.clone(), basisRotation };
+    this.drag = { kind: 'position', node: target.node, attr: target.attr, value: target.value, start: world.clone(), basisRotation };
   }
   dispose(): void {
     if (this.disposed) return;
@@ -236,7 +278,7 @@ export class SceneController {
         if (shieldFrame.children.length) group.add(shieldFrame);
       }
       if (!group.children.length) return;
-      group.userData.nodeId = turret.id; group.traverse((object) => object.userData.nodeId = turret.id); this.root.add(group); this.pickTargets.push(group); this.nodeObjects.set(turret.id, group);
+      group.userData.nodeId = turret.id; group.traverse((object) => object.userData.nodeId = turret.id); this.root.add(group); if (this.options?.showVisualBounds) this.pickTargets.push(group); this.nodeObjects.set(turret.id, group);
     } catch (error) { console.warn(`武器模型加载失败：${weapon.mesh ?? weapon.voxelModel ?? a.weapon_key}`, error); this.onDiagnostic(`武器模型加载失败：${weapon.mesh ?? weapon.voxelModel ?? a.weapon_key}`); }
   }
 
@@ -266,6 +308,77 @@ export class SceneController {
     const matrices = mesh.instanceMatrix.array as Float32Array; this.soldier.initializeInstanceMatrices(matrices); this.soldier.sampleInto(animation, 0, poseBuffer); this.soldier.writePoseMatrices(poseBuffer, matrices); mesh.instanceMatrix.needsUpdate = true;
     mesh.userData.nodeId = slot.id; this.root.add(mesh); this.nodeObjects.set(slot.id, mesh);
     this.occupants.push({ mesh, animation, assets: this.soldier, pose: poseBuffer, dynamic: !this.soldier.isStatic(animation) });
+  }
+
+  private addOccupantPositionMarker(slot: SourceNode, turrets: SourceNode[]): void {
+    if (!this.doc) return;
+    const pose = characterSlotPose(this.doc, slot, turrets);
+    const marker = occupantBox(0xf1c84b, 0.08); marker.position.set(pose.position[0], pose.position[1] + OCCUPANT_BOX_HEIGHT / 2, pose.position[2]);
+    marker.rotation.y = pose.rotation; marker.add(facingArrow(0xf1c84b));
+    marker.userData.nodeId = slot.id; marker.traverse((object) => object.userData.nodeId = slot.id);
+    this.root.add(marker); this.pickTargets.push(marker);
+  }
+
+  private visibleVehicleBounds(): THREE.Box3 {
+    const bounds = new THREE.Box3();
+    for (const object of this.visualObjects) bounds.union(new THREE.Box3().setFromObject(object));
+    return bounds;
+  }
+
+  private addEntranceGuide(slot: SourceNode, turrets: SourceNode[], vehicleBounds: THREE.Box3): void {
+    if (!this.doc) return;
+    const pose = characterSlotPose(this.doc, slot, turrets); const anchor = new THREE.Vector3(...pose.position);
+    const entrance = characterEntranceEdit(this.doc, slot, turrets); if (!entrance) return;
+    let endX: number, endZ: number, boxBottom: number, edit: EntranceEdit;
+    if (entrance.kind === 'position') {
+      // Both enter_position and state/entering.position are vehicle-space destinations.
+      const target = entrance.value; [endX, boxBottom, endZ] = target;
+      edit = { kind: 'position', node: entrance.node, attr: entrance.attr, value: target };
+    } else {
+      const editable = entrance.rotation;
+      const direction = new THREE.Vector3(Math.sin(editable.worldRotation), 0, Math.cos(editable.worldRotation));
+      let distance = 1.1;
+      if (!vehicleBounds.isEmpty()) {
+        const diagonal = Math.hypot(vehicleBounds.max.x - vehicleBounds.min.x, vehicleBounds.max.z - vehicleBounds.min.z);
+        const maxDistance = Math.max(3, diagonal + 2);
+        distance = 0.35;
+        while (distance < maxDistance) {
+          const x = anchor.x + direction.x * distance, z = anchor.z + direction.z * distance;
+          const overlapsXz = x + OCCUPANT_BOX_HALF_WIDTH >= vehicleBounds.min.x && x - OCCUPANT_BOX_HALF_WIDTH <= vehicleBounds.max.x
+            && z + OCCUPANT_BOX_HALF_WIDTH >= vehicleBounds.min.z && z - OCCUPANT_BOX_HALF_WIDTH <= vehicleBounds.max.z;
+          if (!overlapsXz) break;
+          distance += 0.12;
+        }
+      }
+      endX = anchor.x + direction.x * distance; endZ = anchor.z + direction.z * distance;
+      boxBottom = vehicleBounds.isEmpty() ? 0 : vehicleBounds.min.y;
+      edit = { kind: 'rotation', node: editable.node, attr: editable.attr, toXmlRotation: editable.toXmlRotation };
+    }
+    const boxCenter = new THREE.Vector3(endX, boxBottom + OCCUPANT_BOX_HEIGHT / 2, endZ);
+    const horizontalEnd = new THREE.Vector3(endX, anchor.y, endZ);
+    const guideGeometry = new THREE.BufferGeometry().setFromPoints([anchor, horizontalEnd, horizontalEnd, new THREE.Vector3(endX, boxCenter.y, endZ)]);
+    const guideLine = new THREE.LineSegments(guideGeometry, new THREE.LineBasicMaterial({ color: 0x66e0c2, transparent: true, opacity: 0.9 }));
+    const handle = occupantBox(0x66e0c2, 0.12);
+    handle.position.copy(boxCenter); handle.userData.nodeId = slot.id; handle.userData.crewGuideKind = 'entrance'; handle.traverse((object) => object.userData.nodeId = slot.id);
+    this.root.add(guideLine, handle); this.pickTargets.push(handle);
+    this.entranceGuides.set(crewGuideKey(slot.id, 'entrance'), { handle, guideGeometry, edit, anchor });
+  }
+
+  /** Multi-state slots provide a separate vehicle-space leaving point and facing direction. */
+  private addLeavingGuide(slot: SourceNode, turrets: SourceNode[]): void {
+    if (!this.doc) return;
+    const leaving = characterStatePlacement(this.doc, slot, 'leaving', turrets); if (!leaving) return;
+    const pose = characterSlotPose(this.doc, slot, turrets); const anchor = new THREE.Vector3(...pose.position);
+    const [endX, boxBottom, endZ] = leaving.value;
+    const boxCenter = new THREE.Vector3(endX, boxBottom + OCCUPANT_BOX_HEIGHT / 2, endZ);
+    const horizontalEnd = new THREE.Vector3(endX, anchor.y, endZ);
+    const guideGeometry = new THREE.BufferGeometry().setFromPoints([anchor, horizontalEnd, horizontalEnd, new THREE.Vector3(endX, boxCenter.y, endZ)]);
+    const guideLine = new THREE.LineSegments(guideGeometry, new THREE.LineBasicMaterial({ color: 0xff72b6, transparent: true, opacity: 0.9 }));
+    const handle = occupantBox(0xff72b6, 0.12); handle.position.copy(boxCenter); handle.rotation.y = leaving.worldRotation; handle.add(facingArrow(0xff72b6));
+    handle.userData.nodeId = slot.id; handle.userData.crewGuideKind = 'leaving'; handle.traverse((object) => object.userData.nodeId = slot.id);
+    const edit: EntranceEdit = { kind: 'position', node: leaving.node, attr: 'position', value: leaving.value };
+    this.root.add(guideLine, handle); this.pickTargets.push(handle);
+    this.entranceGuides.set(crewGuideKey(slot.id, 'leaving'), { handle, guideGeometry, edit, anchor });
   }
 
   private async buildMesh(meshPath: string, mesh: OgreMesh, visual: SourceNode, generation: number): Promise<THREE.Group> {
@@ -330,7 +443,7 @@ export class SceneController {
     const axes = new THREE.AxesHelper(3); this.scene.add(axes);
   }
   private clearRoot(): void {
-    this.occupants = []; this.pickTargets = []; this.nodeObjects.clear();
+    this.occupants = []; this.pickTargets = []; this.nodeObjects.clear(); this.entranceGuides.clear(); this.visualObjects = [];
     while (this.root.children.length) {
       const child = this.root.children.pop()!;
       child.traverse((o: any) => {
@@ -341,7 +454,7 @@ export class SceneController {
     }
   }
   private resize(): void { const w = this.host.clientWidth, h = this.host.clientHeight; if (!w || !h) return; this.camera.aspect = w / h; this.camera.updateProjectionMatrix(); this.renderer.setSize(w, h, false); }
-  private pick(e: PointerEvent): void { if (this.transform.dragging) return; const r = this.renderer.domElement.getBoundingClientRect(); this.pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1); this.raycaster.setFromCamera(this.pointer, this.camera); const hit = this.raycaster.intersectObjects(this.pickTargets, true).find((x) => findNodeId(x.object) !== undefined); const id = hit ? findNodeId(hit.object) : undefined; if (id !== undefined) this.onSelect(id); }
+  private pick(e: PointerEvent): void { if (this.transform.dragging) return; const r = this.renderer.domElement.getBoundingClientRect(); this.pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1); this.raycaster.setFromCamera(this.pointer, this.camera); const hit = this.raycaster.intersectObjects(this.pickTargets, true).find((x) => findNodeId(x.object) !== undefined); const id = hit ? findNodeId(hit.object) : undefined; if (id !== undefined) this.onSelect(id, findCrewGuideKind(hit!.object)); }
   private loop = (): void => {
     if (this.disposed) return;
     this.frame = requestAnimationFrame(this.loop); this.controls.update(); const now = performance.now();
@@ -357,6 +470,19 @@ export class SceneController {
       occupant.mesh.instanceMatrix.needsUpdate = true;
     }
   }
+}
+
+const OCCUPANT_BOX_HALF_WIDTH = 0.42;
+const OCCUPANT_BOX_HEIGHT = 1.75;
+function occupantBox(color: number, opacity: number): THREE.Mesh {
+  const geometry = new THREE.BoxGeometry(OCCUPANT_BOX_HALF_WIDTH * 2, OCCUPANT_BOX_HEIGHT, OCCUPANT_BOX_HALF_WIDTH * 2);
+  const box = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false }));
+  box.add(new THREE.LineSegments(new THREE.EdgesGeometry(geometry), new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.95 })));
+  return box;
+}
+
+function facingArrow(color: number): THREE.ArrowHelper {
+  return new THREE.ArrowHelper(new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, 0), 0.95, color, 0.22, 0.14);
 }
 
 const VOXEL_CUBE_GEOMETRY = new THREE.BoxGeometry(0.96, 0.96, 0.96);
@@ -396,4 +522,6 @@ function editablePosition(doc: SourceDocument, node: SourceNode): { node: Source
   for (const attr of attrs) if (doc.value(node, attr) !== undefined) return { node, attr, value: vec3(doc.value(node, attr)) }; return null;
 }
 function findNodeId(object: THREE.Object3D): number | undefined { let o: THREE.Object3D | null = object; while (o) { if (typeof o.userData.nodeId === 'number') return o.userData.nodeId; o = o.parent; } return undefined; }
+function crewGuideKey(slotId: number, kind: CrewGuideKind): string { return `${slotId}:${kind}`; }
+function findCrewGuideKind(object: THREE.Object3D): CrewGuideKind | undefined { let o: THREE.Object3D | null = object; while (o) { if (o.userData.crewGuideKind === 'entrance' || o.userData.crewGuideKind === 'leaving') return o.userData.crewGuideKind; o = o.parent; } return undefined; }
 function colorFromName(name: string): THREE.Color { let h = 0; for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0; return new THREE.Color().setHSL((h % 360) / 360, 0.2, 0.42); }

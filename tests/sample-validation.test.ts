@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SourceDocument } from '../src/core/xml/source-document';
-import { characterSlotHidden, characterSlotPose, dragNeedsRebuild, editableBasisRotation, rotateY, sceneEntries, tireVisualPosition, turretWorldPose } from '../src/core/vehicle/vehicle-model';
+import { characterEntranceEdit, characterEntranceRotation, characterSlotHidden, characterSlotPose, characterSlotPositionItems, characterStatePlacement, dragNeedsRebuild, editableBasisRotation, rotateY, sceneEntries, tireVisualPosition, turretWorldPose } from '../src/core/vehicle/vehicle-model';
 import { composeVehicle, vehicleBaseReference } from '../src/core/vehicle/vehicle-composition';
 import { parseOgreMesh } from '../src/core/ogre/mesh-reader';
 import { SoldierAssets, SOLDIER_GAME_SCALE, rwrLinearToDisplay } from '../src/core/soldier/soldier-assets';
@@ -193,6 +193,59 @@ describe('乘员显示规则', () => {
     expect(attached.position[2]).toBeCloseTo(-1 - Math.sin(Math.PI / 2 + 0.5));
     expect(attached.rotation).toBeCloseTo(Math.PI / 2 + 0.75);
     expect(characterSlotPose(doc, slots[1], turrets).position).toEqual([2, 4, 6]);
+  });
+  it('离开方向兼容 exit_rotation、entering state 与炮塔附着旋转', () => {
+    const doc = new SourceDocument('<vehicle><turret rotation="1.5707963267948966"/><character_slot attached_on_turret="0" seat_position="0 0 0" exit_rotation="0"/><character_slot seat_position="0 0 0"><state class="entering" position="1 0 0" rotation="0"/></character_slot></vehicle>');
+    const turrets = doc.descendants('turret'); const [attached, entering] = doc.descendants('character_slot');
+    const exit = characterEntranceRotation(doc, attached, turrets)!;
+    expect(exit.worldRotation).toBeCloseTo(Math.PI / 2);
+    expect(exit.toXmlRotation(Math.PI)).toBeCloseTo(Math.PI / 2);
+    const stateExit = characterEntranceRotation(doc, entering, turrets)!;
+    expect(Math.abs(stateExit.worldRotation)).toBeCloseTo(Math.PI);
+    expect(stateExit.attr).toBe('rotation');
+    expect(stateExit.toXmlRotation(Math.PI / 2)).toBeCloseTo(-Math.PI / 2);
+  });
+  it('enter_position 优先于角度推算并保持载具空间坐标', () => {
+    const doc = new SourceDocument('<vehicle><turret offset="8 0 0" rotation="1.57"/><character_slot type="gunner" attached_on_turret="0" seat_position="1 2 3" enter_position="-4 0.5 6" exit_rotation="1.57"><turret index="2"/></character_slot></vehicle>');
+    const slot = doc.descendants('character_slot')[0]; const edit = characterEntranceEdit(doc, slot, doc.descendants('turret'))!;
+    expect(edit.kind).toBe('position');
+    if (edit.kind === 'position') expect(edit.value).toEqual([-4, 0.5, 6]);
+    expect(sceneEntries(doc).find((entry) => entry.kind === 'slot')?.meta).toBe('index 2');
+  });
+  it('多 state 格式直接使用 entering/leaving 位置，并用 idle 定义车上姿态', () => {
+    const doc = new SourceDocument('<vehicle><turret offset="8 1 0" rotation="1.5707963267948966"/><character_slot attached_on_turret="0"><state class="entering" position="-4 0.5 6" rotation="0.2"/><state class="leaving" position="7 0.25 -3" rotation="-0.4"/><state class="idle" position="1 2 0" rotation="0.3"/></character_slot></vehicle>');
+    const turrets = doc.descendants('turret'); const slot = doc.descendants('character_slot')[0];
+    const entering = characterEntranceEdit(doc, slot, turrets)!;
+    expect(entering.kind).toBe('position');
+    if (entering.kind === 'position') {
+      expect(entering.node).toBe(slot.children[0]);
+      expect(entering.attr).toBe('position');
+      expect(entering.value).toEqual([-4, 0.5, 6]);
+    }
+    const leaving = characterStatePlacement(doc, slot, 'leaving', turrets)!;
+    expect(leaving.value).toEqual([7, 0.25, -3]);
+    expect(leaving.worldRotation).toBeCloseTo(Math.PI / 2 - 0.4);
+    const idle = characterSlotPose(doc, slot, turrets);
+    expect(idle.position).toEqual([8, 3, -1]);
+    expect(idle.rotation).toBeCloseTo(Math.PI / 2 + 0.3);
+  });
+  it('乘员树对单位置使用 position，对多 state 分别列出 entering、leaving 和 idle', () => {
+    const legacy = new SourceDocument('<vehicle><character_slot enter_position="1 0 2"/></vehicle>');
+    expect(characterSlotPositionItems(legacy, legacy.descendants('character_slot')[0])).toEqual([
+      { key: 'position', label: 'position', guide: 'entrance' },
+    ]);
+    const states = new SourceDocument('<vehicle><character_slot><state class="entering" position="1 0 2"/><state class="leaving" position="3 0 4"/><state class="idle" position="0 1 0"/></character_slot></vehicle>');
+    expect(characterSlotPositionItems(states, states.descendants('character_slot')[0])).toEqual([
+      { key: 'entering', label: 'entering', guide: 'entrance' },
+      { key: 'leaving', label: 'leaving', guide: 'leaving' },
+      { key: 'idle', label: 'idle' },
+    ]);
+  });
+  it('gunner 有多个受控炮塔时在左栏列出全部 index', () => {
+    const doc = new SourceDocument('<vehicle><character_slot type="gunner"><turret index="1"/><turret index="3"/></character_slot><character_slot type="passenger"/></vehicle>');
+    const slots = sceneEntries(doc).filter((entry) => entry.kind === 'slot');
+    expect(slots[0].meta).toBe('index 1, 3');
+    expect(slots[1].meta).toBeUndefined();
   });
 });
 

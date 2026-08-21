@@ -6,6 +6,8 @@ export interface VehicleWorkspaceEntry { name: string; path: string; isDirectory
 export interface VehicleWorkspace { root: string; entries: VehicleWorkspaceEntry[] }
 export interface VehicleSchema { objectTypes: string[]; attributes: Record<string, string[]>; skipped: string[] }
 export interface ResourceFolderScan { index: Record<string, string>; duplicates: string[]; warnings: string[] }
+export interface BackupEntry { backupPath: string; sourcePath: string; sourceName: string; backupName: string; modifiedMs: number; size: number; sourceExists: boolean }
+export interface BackupRestoreResult { backupPath: string; sourcePath: string }
 export type ResourceKind = 'model' | 'texture' | 'weapon';
 
 function decodeBase64(base64: string): ArrayBuffer {
@@ -36,4 +38,8 @@ export const desktop = {
   registerVehicleSession: (path: string) => invoke<void>('register_vehicle_session', { path }),
   registerWeaponSession: (path: string) => invoke<void>('register_weapon_session', { path }),
   saveWeapon: (path: string, text: string) => invoke<SavedFile>('save_weapon', { path, text }),
+  listBackups: (roots: string[]) => invoke<BackupEntry[]>('list_backups', { roots }),
+  readBackup: (path: string) => invoke<string>('read_backup', { path }),
+  restoreBackup: (path: string) => invoke<BackupRestoreResult>('restore_backup', { path }),
+  deleteBackups: (paths: string[]) => invoke<number>('delete_backups', { paths }),
 };

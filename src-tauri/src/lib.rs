@@ -9,6 +9,7 @@ use walkdir::WalkDir;
 struct AppState {
     writable: Mutex<HashSet<PathBuf>>,
     writable_weapons: Mutex<HashSet<PathBuf>>,
+    managed_backups: Mutex<HashMap<PathBuf, PathBuf>>,
     schema_cache: Mutex<HashMap<PathBuf, SchemaCacheEntry>>,
 }
 
@@ -21,6 +22,22 @@ struct OpenedFile { name: String, path: String, text: String }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SavedFile { name: String, path: String, backup_path: Option<String> }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupEntry {
+    backup_path: String,
+    source_path: String,
+    source_name: String,
+    backup_name: String,
+    modified_ms: u128,
+    size: u64,
+    source_exists: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupRestoreResult { backup_path: String, source_path: String }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -461,16 +478,116 @@ fn save_weapon(path: String, text: String, state: State<'_, AppState>) -> Result
     save_weapon_impl(path, text, state_ref)
 }
 
-/// Keep a rolling chain of backups (`.bak`, `.bak1`, `.bak2`); returns the newest backup path.
+fn backup_source_path(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    let lower = name.to_ascii_lowercase();
+    let index = lower.rfind(".bak")?;
+    let suffix = &lower[index + 4..];
+    if !suffix.is_empty() && !suffix.chars().all(|value| value.is_ascii_digit()) { return None }
+    let source_name = &name[..index];
+    let source = path.parent()?.join(source_name);
+    let extension = source.extension()?.to_str()?;
+    if !["vehicle", "xml", "weapon"].iter().any(|value| extension.eq_ignore_ascii_case(value)) { return None }
+    Some(source)
+}
+
+fn backup_roots(roots: Vec<String>, state: &AppState) -> Result<Vec<PathBuf>, String> {
+    let mut result = BTreeSet::new();
+    for root in roots {
+        let path = PathBuf::from(root);
+        if let Ok(canonical) = path.canonicalize() { if canonical.is_dir() { result.insert(canonical); } }
+    }
+    for path in state.writable.lock().map_err(|_| "载具权限状态不可用")?.iter() {
+        if let Some(parent) = path.parent() { result.insert(parent.to_path_buf()); }
+    }
+    for path in state.writable_weapons.lock().map_err(|_| "武器权限状态不可用")?.iter() {
+        if let Some(parent) = path.parent() { result.insert(parent.to_path_buf()); }
+    }
+    Ok(result.into_iter().collect())
+}
+
+#[tauri::command]
+fn list_backups(roots: Vec<String>, state: State<'_, AppState>) -> Result<Vec<BackupEntry>, String> {
+    let mut paths = BTreeSet::new();
+    for root in backup_roots(roots, state.inner())? {
+        for entry in WalkDir::new(root).follow_links(false).into_iter().filter_map(Result::ok) {
+            if entry.file_type().is_file() && backup_source_path(entry.path()).is_some() {
+                if let Ok(canonical) = entry.path().canonicalize() { paths.insert(canonical); }
+            }
+        }
+    }
+    let mut managed = HashMap::new();
+    let mut entries = Vec::new();
+    for backup in paths {
+        let Some(source) = backup_source_path(&backup) else { continue };
+        let metadata = match fs::metadata(&backup) { Ok(value) => value, Err(_) => continue };
+        let modified_ms = metadata.modified().ok().and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok()).map(|value| value.as_millis()).unwrap_or(0);
+        managed.insert(backup.clone(), source.clone());
+        entries.push(BackupEntry {
+            backup_path: display(&backup), source_path: display(&source), source_name: file_name(&source), backup_name: file_name(&backup),
+            modified_ms, size: metadata.len(), source_exists: source.is_file(),
+        });
+    }
+    entries.sort_by(|left, right| left.source_name.to_ascii_lowercase().cmp(&right.source_name.to_ascii_lowercase()).then_with(|| left.backup_name.cmp(&right.backup_name)));
+    *state.managed_backups.lock().map_err(|_| "备份权限状态不可用")? = managed;
+    Ok(entries)
+}
+
+fn registered_backup(path: &str, state: &AppState) -> Result<(PathBuf, PathBuf), String> {
+    let backup = PathBuf::from(path).canonicalize().map_err(|e| format!("无法确认备份路径：{e}"))?;
+    let managed = state.managed_backups.lock().map_err(|_| "备份权限状态不可用")?;
+    let source = managed.get(&backup).cloned().ok_or_else(|| "拒绝操作：请先在备份管理器中重新扫描该文件".to_string())?;
+    Ok((backup, source))
+}
+
+#[tauri::command]
+fn read_backup(path: String, state: State<'_, AppState>) -> Result<String, String> {
+    let (backup, _) = registered_backup(&path, state.inner())?;
+    let metadata = fs::metadata(&backup).map_err(|e| format!("读取备份信息失败：{e}"))?;
+    if metadata.len() > 16 * 1024 * 1024 { return Err("备份超过 16 MiB，无法在文本预览中打开".into()) }
+    decode_text(fs::read(backup).map_err(|e| format!("读取备份失败：{e}"))?)
+}
+
+#[tauri::command]
+fn restore_backup(path: String, state: State<'_, AppState>) -> Result<BackupRestoreResult, String> {
+    let (backup, source) = registered_backup(&path, state.inner())?;
+    let bytes = fs::read(&backup).map_err(|e| format!("读取备份失败：{e}"))?;
+    if source.exists() { write_backup(&source)?; }
+    atomic_write(&source, &bytes)?;
+    let canonical_source = source.canonicalize().map_err(|e| format!("无法确认恢复后的源文件：{e}"))?;
+    if canonical_source.extension().and_then(|value| value.to_str()).is_some_and(|value| value.eq_ignore_ascii_case("weapon")) {
+        state.writable_weapons.lock().map_err(|_| "武器权限状态不可用")?.insert(canonical_source.clone());
+    } else {
+        state.writable.lock().map_err(|_| "载具权限状态不可用")?.insert(canonical_source.clone());
+    }
+    Ok(BackupRestoreResult { backup_path: display(&backup), source_path: display(&canonical_source) })
+}
+
+#[tauri::command]
+fn delete_backups(paths: Vec<String>, state: State<'_, AppState>) -> Result<usize, String> {
+    let registered = paths.iter().map(|path| registered_backup(path, state.inner()).map(|value| value.0)).collect::<Result<Vec<_>, _>>()?;
+    let mut removed = 0;
+    for backup in registered { if backup.exists() { fs::remove_file(&backup).map_err(|e| format!("删除备份失败：{e}"))?; removed += 1; } }
+    Ok(removed)
+}
+
+/// Keep only two generations (`.bak` and `.bak1`); returns the newest backup path.
 fn write_backup(target: &Path) -> Result<Option<PathBuf>, String> {
     if !target.exists() { return Ok(None) }
-    const GENERATIONS: usize = 3;
     let backup = PathBuf::from(format!("{}.bak", display(target)));
-    for i in (1..GENERATIONS).rev() {
-        let older = PathBuf::from(format!("{}{i}", display(&backup)));
-        let _ = fs::remove_file(&older);
-        let newer = if i == 1 { backup.clone() } else { PathBuf::from(format!("{}{}", display(&backup), i - 1)) };
-        if newer.exists() { let _ = fs::rename(&newer, &older); }
+    let backup1 = PathBuf::from(format!("{}1", display(&backup)));
+    let _ = fs::remove_file(&backup1);
+    if backup.exists() { fs::rename(&backup, &backup1).map_err(|e| format!("轮换备份失败：{e}"))?; }
+    if let Some(parent) = target.parent() {
+        let prefix = format!("{}.bak", file_name(target)).to_ascii_lowercase();
+        if let Ok(items) = fs::read_dir(parent) {
+            for item in items.filter_map(Result::ok) {
+                let name = item.file_name().to_string_lossy().to_ascii_lowercase();
+                if let Some(suffix) = name.strip_prefix(&prefix) {
+                    if suffix.parse::<usize>().is_ok_and(|generation| generation >= 2) { let _ = fs::remove_file(item.path()); }
+                }
+            }
+        }
     }
     fs::copy(target, &backup).map_err(|e| format!("创建备份失败：{e}"))?;
     Ok(Some(backup))
@@ -658,15 +775,14 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "<weapon>v4</weapon>");
         let bak = PathBuf::from(format!("{}.bak", display(&path)));
         let bak1 = PathBuf::from(format!("{}.bak1", display(&path)));
-        let bak2 = PathBuf::from(format!("{}.bak2", display(&path)));
         assert_eq!(fs::read_to_string(&bak).unwrap(), "<weapon>v3</weapon>");
         assert_eq!(fs::read_to_string(&bak1).unwrap(), "<weapon>v2</weapon>");
-        assert_eq!(fs::read_to_string(&bak2).unwrap(), "<weapon>v1</weapon>");
+        assert!(!PathBuf::from(format!("{}.bak2", display(&path))).exists());
         let parent = path.parent().unwrap();
         let leftover_temp = fs::read_dir(parent).unwrap().filter_map(Result::ok)
             .any(|e| e.file_name().to_string_lossy().starts_with(&format!(".{unique}.weapon.")) && e.file_name().to_string_lossy().ends_with(".tmp"));
         assert!(!leftover_temp, "临时文件未被清理");
-        let _ = fs::remove_file(&path); let _ = fs::remove_file(&bak); let _ = fs::remove_file(&bak1); let _ = fs::remove_file(&bak2);
+        let _ = fs::remove_file(&path); let _ = fs::remove_file(&bak); let _ = fs::remove_file(&bak1);
     }
 }
 
@@ -686,7 +802,8 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![open_vehicle, open_vehicle_path, resolve_vehicle_base, choose_vehicle_base, choose_vehicle_workspace, scan_vehicle_workspace, scan_vehicle_schema, list_workspace_dir,
             choose_folder, choose_override_file, choose_support_file,
-            scan_resource_folder, read_text_path, read_builtin_support, read_binary_base64, save_vehicle, register_vehicle_session, register_weapon_session, save_weapon])
+            scan_resource_folder, read_text_path, read_builtin_support, read_binary_base64, save_vehicle, register_vehicle_session, register_weapon_session, save_weapon,
+            list_backups, read_backup, restore_backup, delete_backups])
         .run(tauri::generate_context!())
         .expect("RWR Vehicle Studio failed to start");
 }
