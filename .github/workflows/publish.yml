@@ -7,9 +7,12 @@ on:
         description: Existing GitHub Release tag to build and upload assets for
         required: true
         type: string
+  push:
+    branches:
+      - release/0.4.0
 
 concurrency:
-  group: release-${{ inputs.tag }}
+  group: release-${{ inputs.tag || '0.4.0' }}
   cancel-in-progress: false
 
 jobs:
@@ -17,7 +20,7 @@ jobs:
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.platform }}
     env:
-      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_TAG: ${{ inputs.tag || '0.4.0' }}
     strategy:
       fail-fast: false
       matrix:
@@ -32,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: refs/tags/${{ inputs.tag }}
+          ref: refs/tags/${{ inputs.tag || '0.4.0' }}
 
       - name: install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -125,7 +128,7 @@ jobs:
     permissions:
       contents: write
     env:
-      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_TAG: ${{ inputs.tag || '0.4.0' }}
       GH_REPO: ${{ github.repository }}
     steps:
       - name: download all release artifacts
@@ -133,12 +136,16 @@ jobs:
         with:
           path: release-artifacts
 
-      - name: upload assets to existing GitHub Release
+      - name: create or update formal GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh release view "$RELEASE_TAG"
+          if ! gh release view "$RELEASE_TAG"; then
+            gh release create "$RELEASE_TAG" \
+              --title "RWR Vehicle Studio $RELEASE_TAG" \
+              --generate-notes
+          fi
           mapfile -t assets < <(find release-artifacts -type f -print | sort)
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "No release assets found" >&2
