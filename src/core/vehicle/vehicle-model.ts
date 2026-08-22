@@ -9,6 +9,12 @@ export interface SceneEntry {
   meta?: string;
 }
 
+export interface EditablePosition {
+  node: SourceNode;
+  attr: string;
+  value: Vec3;
+}
+
 export function sceneEntries(doc: SourceDocument): SceneEntry[] {
   const root = doc.root; if (!root || root.name !== 'vehicle') throw new Error('根元素不是 <vehicle>');
   const result: SceneEntry[] = [];
@@ -115,16 +121,16 @@ export interface CharacterStatePlacement {
 }
 
 /** Resolve a turret's vehicle-space pose, including parent_turret_index chains. */
-export function turretWorldPose(doc: SourceDocument, turrets: SourceNode[], index: number, visiting = new Set<number>()): TurretPose | null {
+export function turretWorldPose(doc: SourceDocument, turrets: SourceNode[], index: number, visiting = new Set<number>(), rotationDeltas?: ReadonlyMap<number, number>): TurretPose | null {
   const turret = turrets[index];
   if (!turret || visiting.has(index)) return null;
   const localPosition = vec3(doc.value(turret, 'offset'));
-  const localRotation = finiteNumber(doc.value(turret, 'rotation'));
+  const localRotation = finiteNumber(doc.value(turret, 'rotation')) + (rotationDeltas?.get(index) ?? 0);
   const parentIndex = integerIndex(doc.value(turret, 'parent_turret_index'));
   if (parentIndex === null || parentIndex === index || !turrets[parentIndex]) return { position: localPosition, rotation: localRotation };
 
   const next = new Set(visiting); next.add(index);
-  const parent = turretWorldPose(doc, turrets, parentIndex, next);
+  const parent = turretWorldPose(doc, turrets, parentIndex, next, rotationDeltas);
   if (!parent) return { position: localPosition, rotation: localRotation };
   const rotated = rotateY(localPosition, parent.rotation);
   return {
@@ -139,14 +145,14 @@ export function turretWorldPose(doc: SourceDocument, turrets: SourceNode[], inde
  * to the seat coordinate system. When the attribute is absent, the seat remains
  * in vehicle space.
  */
-export function characterSlotPose(doc: SourceDocument, slot: SourceNode, turrets: SourceNode[]): CharacterSlotPose {
+export function characterSlotPose(doc: SourceDocument, slot: SourceNode, turrets: SourceNode[], rotationDeltas?: ReadonlyMap<number, number>): CharacterSlotPose {
   const idle = idleState(doc, slot);
   const localPosition = vec3((idle ? doc.value(idle, 'position') : undefined) ?? doc.value(slot, 'seat_position') ?? doc.value(slot, 'position'));
   const localRotation = finiteNumber(idle ? doc.value(idle, 'rotation') ?? doc.value(slot, 'rotation') : doc.value(slot, 'rotation'));
   const attachmentIndex = integerIndex(doc.value(slot, 'attached_on_turret'));
   if (attachmentIndex === null) return { position: localPosition, rotation: localRotation, attachmentIndex: null, attachmentRotation: 0 };
 
-  const turret = turretWorldPose(doc, turrets, attachmentIndex);
+  const turret = turretWorldPose(doc, turrets, attachmentIndex, new Set<number>(), rotationDeltas);
   if (!turret) return { position: localPosition, rotation: localRotation, attachmentIndex, attachmentRotation: 0 };
   const rotated = rotateY(localPosition, turret.rotation);
   return {
@@ -218,7 +224,7 @@ export function characterStatePlacement(doc: SourceDocument, slot: SourceNode, s
  * the inverse of this to convert a world-space drag delta back into the local
  * XML delta before writing it.
  */
-export function editableBasisRotation(doc: SourceDocument, node: SourceNode): number {
+export function editableBasisRotation(doc: SourceDocument, node: SourceNode, attr?: string): number {
   const turrets = doc.root?.children.filter((n) => n.name === 'turret') ?? [];
   if (node.name === 'character_slot') return characterSlotPose(doc, node, turrets).attachmentRotation;
   if (node.name === 'visual' && doc.value(node, 'class') === 'turret') {
@@ -226,6 +232,10 @@ export function editableBasisRotation(doc: SourceDocument, node: SourceNode): nu
     return turretWorldPose(doc, turrets, index)?.rotation ?? 0;
   }
   if (node.name === 'turret') {
+    if (attr === 'weapon_offset') {
+      const index = turrets.indexOf(node);
+      return index < 0 ? 0 : turretWorldPose(doc, turrets, index)?.rotation ?? 0;
+    }
     const parentIndex = integerIndex(doc.value(node, 'parent_turret_index'));
     if (parentIndex === null || parentIndex === turrets.indexOf(node)) return 0;
     return turretWorldPose(doc, turrets, parentIndex)?.rotation ?? 0;
@@ -249,8 +259,79 @@ export function localDragValue(worldDelta: Vec3, basisRotation: number, current:
  * Turret offsets parent other turrets / turret visuals / attached occupants, so
  * an in-place Object3D move would leave all dependent world poses stale (R3-002).
  */
-export function dragNeedsRebuild(node: SourceNode): boolean {
-  return node.name === 'turret';
+export function dragNeedsRebuild(node: SourceNode, attr?: string): boolean {
+  return node.name === 'turret' && attr !== 'weapon_offset';
+}
+
+export interface TurretPivotUpdate {
+  node: SourceNode;
+  attr: string;
+  value: Vec3;
+}
+
+/**
+ * Move a turret's logical rotation pivot while preserving the current zero-angle
+ * placement of its appearance, weapon and directly attached children.  The
+ * turret offset is expressed in its parent's coordinates; all compensated
+ * offsets are expressed in the turret's own rotated coordinates.
+ */
+export function turretPivotUpdates(doc: SourceDocument, turret: SourceNode, nextOffset: Vec3): TurretPivotUpdate[] {
+  const root = doc.root;
+  if (!root || turret.name !== 'turret') return [];
+  const turrets = root.children.filter((node) => node.name === 'turret');
+  const turretIndex = turrets.indexOf(turret);
+  if (turretIndex < 0) return [];
+
+  const previous = vec3(doc.value(turret, 'offset'));
+  const delta: Vec3 = [nextOffset[0] - previous[0], nextOffset[1] - previous[1], nextOffset[2] - previous[2]];
+  const localRotation = finiteNumber(doc.value(turret, 'rotation'));
+  const correction = rotateY(delta, -localRotation);
+  const compensate = (value: string | undefined): Vec3 => {
+    const current = vec3(value);
+    return [current[0] - correction[0], current[1] - correction[1], current[2] - correction[2]];
+  };
+  const updates: TurretPivotUpdate[] = [{ node: turret, attr: 'offset', value: nextOffset }];
+
+  if (doc.value(turret, 'weapon_key') !== undefined || doc.value(turret, 'weapon_offset') !== undefined)
+    updates.push({ node: turret, attr: 'weapon_offset', value: compensate(doc.value(turret, 'weapon_offset')) });
+
+  for (const visual of root.children.filter((node) => node.name === 'visual' && doc.value(node, 'class') === 'turret')) {
+    if (integerIndex(doc.value(visual, 'turret_index') ?? '0') !== turretIndex) continue;
+    updates.push({ node: visual, attr: 'offset', value: compensate(doc.value(visual, 'offset')) });
+  }
+
+  for (const child of turrets) {
+    if (integerIndex(doc.value(child, 'parent_turret_index')) !== turretIndex) continue;
+    updates.push({ node: child, attr: 'offset', value: compensate(doc.value(child, 'offset')) });
+  }
+
+  for (const slot of root.children.filter((node) => node.name === 'character_slot')) {
+    if (integerIndex(doc.value(slot, 'attached_on_turret')) !== turretIndex) continue;
+    const idle = idleState(doc, slot);
+    if (idle && doc.value(idle, 'position') !== undefined) updates.push({ node: idle, attr: 'position', value: compensate(doc.value(idle, 'position')) });
+    else if (doc.value(slot, 'seat_position') !== undefined) updates.push({ node: slot, attr: 'seat_position', value: compensate(doc.value(slot, 'seat_position')) });
+    else if (doc.value(slot, 'position') !== undefined) updates.push({ node: slot, attr: 'position', value: compensate(doc.value(slot, 'position')) });
+    else updates.push({ node: slot, attr: 'seat_position', value: compensate(undefined) });
+  }
+  return updates;
+}
+
+/** Resolve the XML position edited by the viewport gizmo for a scene node. */
+export function editablePosition(doc: SourceDocument, node: SourceNode): EditablePosition | null {
+  const idle = node.name === 'character_slot' ? idleState(doc, node) : undefined;
+  if (idle && doc.value(idle, 'position') !== undefined) return { node: idle, attr: 'position', value: vec3(doc.value(idle, 'position')) };
+  // A scene "turret" entry represents its mounted .weapon. The turret offset
+  // remains editable in the inspector, but viewport dragging moves the weapon.
+  if (node.name === 'turret') {
+    return doc.value(node, 'weapon_offset') === undefined ? null : { node, attr: 'weapon_offset', value: vec3(doc.value(node, 'weapon_offset')) };
+  }
+  const attrs = node.name === 'physics'
+    ? ['collision_model_pos', 'visual_offset', 'offset']
+    : node.name === 'character_slot'
+      ? ['seat_position', 'position', 'enter_position']
+      : ['offset'];
+  for (const attr of attrs) if (doc.value(node, attr) !== undefined) return { node, attr, value: vec3(doc.value(node, attr)) };
+  return null;
 }
 
 /** Static voxel weapons point toward -X; vehicle-mounted weapons point toward +Z. */

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SourceDocument } from '../src/core/xml/source-document';
-import { characterEntranceEdit, characterEntranceRotation, characterSlotHidden, characterSlotPose, characterSlotPositionItems, characterStatePlacement, dragNeedsRebuild, editableBasisRotation, rotateY, sceneEntries, tireVisualPosition, turretWorldPose } from '../src/core/vehicle/vehicle-model';
+import { characterEntranceEdit, characterEntranceRotation, characterSlotHidden, characterSlotPose, characterSlotPositionItems, characterStatePlacement, dragNeedsRebuild, editableBasisRotation, editablePosition, rotateY, sceneEntries, tireVisualPosition, turretPivotUpdates, turretWorldPose } from '../src/core/vehicle/vehicle-model';
 import { composeVehicle, vehicleBaseReference } from '../src/core/vehicle/vehicle-composition';
 import { parseOgreMesh } from '../src/core/ogre/mesh-reader';
 import { SoldierAssets, SOLDIER_GAME_SCALE, rwrLinearToDisplay } from '../src/core/soldier/soldier-assets';
@@ -269,6 +269,16 @@ describe('局部坐标编辑基准（RV-003）', () => {
     expect(editableBasisRotation(doc, turrets[0])).toBe(0);
     expect(editableBasisRotation(doc, turrets[1])).toBeCloseTo(Math.PI / 2);
   });
+  it('炮塔场景对象拖动 weapon_offset，并使用炮塔自身的累计旋转作为基准', () => {
+    const doc = new SourceDocument('<vehicle><turret offset="10 0 0" rotation="1.5707963267948966" weapon_offset="1 2 3"/></vehicle>');
+    const turret = doc.descendants('turret')[0];
+    expect(editablePosition(doc, turret)).toEqual({ node: turret, attr: 'weapon_offset', value: [1, 2, 3] });
+    expect(editableBasisRotation(doc, turret, 'weapon_offset')).toBeCloseTo(Math.PI / 2);
+  });
+  it('炮塔没有 weapon_offset 时，不再把视口拖动错误映射到 offset', () => {
+    const doc = new SourceDocument('<vehicle><turret offset="10 0 0"/></vehicle>');
+    expect(editablePosition(doc, doc.descendants('turret')[0])).toBeNull();
+  });
   it('turret visual 的 offset 基准是 turret_index 炮塔的累计旋转', () => {
     const doc = new SourceDocument('<vehicle><turret rotation="1.5707963267948966"/><visual class="turret" turret_index="0" offset="1 0 0"/></vehicle>');
     expect(editableBasisRotation(doc, doc.descendants('visual')[0])).toBeCloseTo(Math.PI / 2);
@@ -300,6 +310,7 @@ describe('增量拖拽重建判定（R3-002）', () => {
     const visual = doc.root!.children.find((n) => n.name === 'visual')!;
     const slot = doc.root!.children.find((n) => n.name === 'character_slot')!;
     expect(dragNeedsRebuild(turret)).toBe(true);
+    expect(dragNeedsRebuild(turret, 'weapon_offset')).toBe(false);
     expect(dragNeedsRebuild(visual)).toBe(false);
     expect(dragNeedsRebuild(slot)).toBe(false);
   });
@@ -326,5 +337,33 @@ describe('增量拖拽重建判定（R3-002）', () => {
     const movedSlotPose = characterSlotPose(moved, movedSlot, movedTurrets);
     expect(movedSlotPose.position[0]).toBeCloseTo(slotPose.position[0] + 2);
     expect(movedSlotPose.position[1]).toBeCloseTo(slotPose.position[1]);
+  });
+});
+
+describe('炮塔旋转中点编辑', () => {
+  it('移动中点会反向补偿炮塔外观、武器、子炮塔和 attached 乘员', () => {
+    const doc = new SourceDocument('<vehicle><turret offset="1 0 2" weapon_key="gun.weapon" weapon_offset="0.5 0 0"/><turret parent_turret_index="0" offset="2 0 0"/><visual class="turret" turret_index="0" offset="0 1 0"/><character_slot attached_on_turret="0" seat_position="0 2 0" enter_position="9 0 9"/><character_slot attached_on_turret="0"><state class="entering" position="7 0 7"/><state class="idle" position="1 1 1"/></character_slot></vehicle>');
+    const turret = doc.root!.children.filter((node) => node.name === 'turret')[0];
+    const updates = turretPivotUpdates(doc, turret, [2, 0, 4]);
+    const byNodeAndAttr = new Map(updates.map((update) => [`${update.node.id}:${update.attr}`, update.value]));
+    const [first, second] = doc.root!.children.filter((node) => node.name === 'turret');
+    const visual = doc.descendants('visual')[0]; const [legacySlot, stateSlot] = doc.descendants('character_slot');
+    const idle = stateSlot.children.find((node) => doc.value(node, 'class') === 'idle')!;
+    expect(byNodeAndAttr.get(`${first.id}:offset`)).toEqual([2, 0, 4]);
+    expect(byNodeAndAttr.get(`${first.id}:weapon_offset`)).toEqual([-0.5, 0, -2]);
+    expect(byNodeAndAttr.get(`${second.id}:offset`)).toEqual([1, 0, -2]);
+    expect(byNodeAndAttr.get(`${visual.id}:offset`)).toEqual([-1, 1, -2]);
+    expect(byNodeAndAttr.get(`${legacySlot.id}:seat_position`)).toEqual([-1, 2, -2]);
+    expect(byNodeAndAttr.get(`${idle.id}:position`)).toEqual([0, 1, -1]);
+    expect(updates.some((update) => update.attr === 'enter_position' || doc.value(update.node, 'class') === 'entering')).toBe(false);
+  });
+
+  it('预览旋转会带动子炮塔和附着乘员，但不会改写文档', () => {
+    const doc = new SourceDocument('<vehicle><turret offset="0 0 0"/><turret parent_turret_index="0" offset="2 0 0"/><character_slot attached_on_turret="0" seat_position="1 0 0"/></vehicle>');
+    const turrets = doc.root!.children.filter((node) => node.name === 'turret'); const slot = doc.descendants('character_slot')[0];
+    const rotations = new Map([[0, Math.PI / 2]]);
+    expect(turretWorldPose(doc, turrets, 1, new Set<number>(), rotations)!.position[2]).toBeCloseTo(-2);
+    expect(characterSlotPose(doc, slot, turrets, rotations).position[2]).toBeCloseTo(-1);
+    expect(doc.serialize()).toContain('offset="2 0 0"');
   });
 });

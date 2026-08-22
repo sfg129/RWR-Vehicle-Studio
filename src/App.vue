@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
 import EditorViewport from './components/EditorViewport.vue';
+import IconRenderer from './components/IconRenderer.vue';
 import ResourceDialog from './components/ResourceDialog.vue';
 import OverrideDialog from './components/OverrideDialog.vue';
 import BackupManagerDialog from './components/BackupManagerDialog.vue';
@@ -11,7 +12,7 @@ import { exit } from '@tauri-apps/plugin-process';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { SourceDocument, type SourceNode } from './core/xml/source-document';
 import { ResourceCatalog, StaleResourceApplyError } from './core/resources/resource-catalog';
-import { characterSlotPositionItems, sceneEntries, type CharacterSlotPositionItem, type SceneEntry } from './core/vehicle/vehicle-model';
+import { characterSlotPositionItems, sceneEntries, turretPivotUpdates, type CharacterSlotPositionItem, type SceneEntry } from './core/vehicle/vehicle-model';
 import { composeVehicle, vehicleBaseReference, type VehicleComposition } from './core/vehicle/vehicle-composition';
 import { SoldierAssets } from './core/soldier/soldier-assets';
 import { invalidateSoldierAssets, loadSoldierAssets } from './core/soldier/soldier-loader';
@@ -22,6 +23,8 @@ import {
   DEFAULT_RESOURCE_SELECTION,
   cloneResourceSelection,
   loadResourcePreferences,
+  DEFAULT_WW2_BASE_MODEL_FOLDER,
+  setWw2BaseModelFallback,
   type ResourceSelection,
 } from './core/resources/resource-presets';
 import { flattenWorkspace, loadWorkspacePreferences, saveWorkspacePreferences } from './core/workspace/vehicle-workspace';
@@ -41,7 +44,7 @@ catalog.secondaryFolders = {
   texture: [...rememberedSelection.secondaryFolders.texture],
   weapon: [...rememberedSelection.secondaryFolders.weapon],
 };
-const entries = ref<SceneEntry[]>([]); const selectedId = ref<number>(); const selectedEntrance = ref<CrewGuideKind>(); const { documentRevision, sceneRevision, markDocumentChanged, markSceneChanged } = createEditorRevisions(); const resourceGeneration = ref(0); const status = ref('请选择 .vehicle 文件');
+const entries = ref<SceneEntry[]>([]); const selectedId = ref<number>(); const selectedEntrance = ref<CrewGuideKind>(); const selectedTurretPivot = ref(false); const turretPreviewDegrees = ref(0); const { documentRevision, sceneRevision, markDocumentChanged, markSceneChanged } = createEditorRevisions(); const resourceGeneration = ref(0); const status = ref('请选择 .vehicle 文件');
 const missing = ref<string[]>([]); const sceneDiagnostics = ref<string[]>([]); const resourceDialog = ref(false); const overrideDialog = ref(false); const backupDialog = ref(false); const soldier = ref<SoldierAssets>();
 const supportModel = ref(rememberedSelection.supportModel || BUILTIN_SUPPORT_MODEL);
 const supportAnimations = ref(rememberedSelection.supportAnimations || BUILTIN_SUPPORT_ANIMATIONS);
@@ -55,6 +58,7 @@ interface WeaponSession { key: string; path: string; name: string; document: Sou
 const weaponSessions = new Map<string, WeaponSession>(); const weaponSession = ref<WeaponSession>(); const weaponLoadError = ref(''); const weaponRevision = ref(0); const weaponDirtyCount = ref(0);
 const lastEditedDoc = ref<'vehicle' | string>('vehicle');
 const saving = ref(false);
+const activeMode = ref<'editor' | 'render'>('editor');
 
 // 灾难关闭快速备份：脏状态确认退出时写入 localStorage，下次启动提示恢复。
 const RECOVERY_KEY = 'rwr-vehicle-studio.recovery.v1';
@@ -89,7 +93,7 @@ async function applyRecoverySnapshot(recovery: RecoverySnapshot): Promise<void> 
     opened.value = { name: recovery.vehicle.name, path: recovery.vehicle.path, text: recovery.vehicle.workingText };
     document.value = new SourceDocument(recovery.vehicle.workingText);
     savedText.value = recovery.vehicle.savedText;
-    undoStack.value = []; missing.value = []; collapsedGroups.clear(); expandedCrewSlots.clear();
+    undoStack.value = []; missing.value = []; collapsedGroups.clear(); expandedCrewSlots.clear(); expandedTurrets.clear(); selectedTurretPivot.value = false; turretPreviewDegrees.value = 0;
     markDocumentChanged();
     try { await desktop.registerVehicleSession(recovery.vehicle.path); } catch (error) { registrationFailures.push(`载具：${recovery.vehicle.path}（${message(error)}）`); }
     await resolveAutomaticBase();
@@ -200,7 +204,7 @@ async function loadOpenedVehicle(file: OpenedFile) {
   if (parsed.root?.name !== 'vehicle') {
     throw new Error(`所选文件 ${file.name} 的根元素不是 <vehicle>`);
   }
-  opened.value = file; document.value = parsed; savedText.value = file.text; undoStack.value = []; missing.value = []; collapsedGroups.clear(); expandedCrewSlots.clear();
+  opened.value = file; document.value = parsed; savedText.value = file.text; undoStack.value = []; missing.value = []; collapsedGroups.clear(); expandedCrewSlots.clear(); expandedTurrets.clear(); selectedTurretPivot.value = false; turretPreviewDegrees.value = 0;
   if (document.value.structuralErrors.length) status.value = `已打开 ${file.name}；检测到 ${document.value.structuralErrors.length} 处 XML 结构问题（保存时会提示）`;
   await resolveAutomaticBase(token);
   if (token !== vehicleLoadToken) return;
@@ -245,7 +249,7 @@ async function openBaseVehicle() {
   catch (error) { fail(error); }
 }
 function recomputePreview(preserveSelection = true) {
-  if (!document.value) { previewDocument.value = undefined; composition = undefined; entries.value = []; selectedId.value = undefined; return; }
+  if (!document.value) { previewDocument.value = undefined; composition = undefined; entries.value = []; selectedId.value = undefined; selectedTurretPivot.value = false; turretPreviewDegrees.value = 0; return; }
   const previous = preserveSelection ? selected.value : undefined;
   const identity = previous ? { kind: previous.kind, index: previous.index } : undefined;
   composition = composeVehicle(baseDocument.value, document.value); previewDocument.value = composition.document; entries.value = sceneEntries(composition.document);
@@ -305,9 +309,11 @@ async function refreshVehicleSchema(root: string) {
 }
 const collapsedGroups = reactive(new Set<string>());
 const expandedCrewSlots = reactive(new Set<number>());
+const expandedTurrets = reactive(new Set<number>());
 function toggleWorkspacePanel() { workspacePanelOpen.value = !workspacePanelOpen.value; persistVehicleWorkspace(); }
 function toggleGroup(kind: string) { if (collapsedGroups.has(kind)) collapsedGroups.delete(kind); else collapsedGroups.add(kind); }
 function toggleCrewSlot(id: number) { if (expandedCrewSlots.has(id)) expandedCrewSlots.delete(id); else expandedCrewSlots.add(id); }
+function toggleTurret(id: number) { if (expandedTurrets.has(id)) expandedTurrets.delete(id); else expandedTurrets.add(id); }
 function collapseAnim(node: HTMLElement, from: string, to: string, done: () => void) {
   let finished = false;
   const finish = () => { if (finished) return; finished = true; node.style.height = ''; done(); };
@@ -338,8 +344,10 @@ async function activateWorkspaceEntry(entry: VehicleWorkspaceEntry) {
 }
 async function indexRememberedResources(selection: ResourceSelection, token: number) {
   try {
-    const applied = await catalog.applyFolders({ ...selection.folders }, false, selection.secondaryFolders); if (token !== vehicleLoadToken) return;
-    await resourcesApplied(selection, token, applied.changed);
+    const fallbackAvailable = await desktop.directoryExists(DEFAULT_WW2_BASE_MODEL_FOLDER); if (token !== vehicleLoadToken) return;
+    const resolvedSelection = setWw2BaseModelFallback(selection, fallbackAvailable);
+    const applied = await catalog.applyFolders({ ...resolvedSelection.folders }, false, resolvedSelection.secondaryFolders); if (token !== vehicleLoadToken) return;
+    await resourcesApplied(resolvedSelection, token, applied.changed);
   } catch (error) {
     if (token !== vehicleLoadToken || error instanceof StaleResourceApplyError) return;
     status.value = `上次使用的资源路径不可用：${message(error)}`; resourceDialog.value = true;
@@ -474,7 +482,8 @@ function scheduleValidate() {
   if (validateTimer !== undefined) window.clearTimeout(validateTimer);
   validateTimer = window.setTimeout(() => { void validate(); }, 300);
 }
-function select(id: number, guide?: CrewGuideKind) { selectedId.value = id; selectedEntrance.value = guide; }
+function select(id: number, guide?: CrewGuideKind) { selectedId.value = id; selectedEntrance.value = guide; selectedTurretPivot.value = false; turretPreviewDegrees.value = 0; }
+function selectTurretPivot(entry: SceneEntry) { selectedId.value = entry.node.id; selectedEntrance.value = undefined; selectedTurretPivot.value = true; turretPreviewDegrees.value = 0; }
 function selectCrewTreeItem(entry: SceneEntry, item: CharacterSlotPositionItem) {
   if (item.guide) options.showEntrances = true;
   select(entry.node.id, item.guide);
@@ -515,6 +524,39 @@ function move(node: SourceNode, attr: string, value: [number, number, number], n
   recordUndo(); document.value.set(sourceNode, attr, text); markDocumentChanged();
   if (needsRebuild) rebuildPreview(); else recomputePreview();
   status.value = `${attr} = ${text}`;
+}
+function sourceNodePath(node: SourceNode): number[] {
+  const path: number[] = []; let current: SourceNode | null = node;
+  while (current?.parent) { path.unshift(current.parent.children.indexOf(current)); current = current.parent; }
+  return path;
+}
+function sourceNodeAtPath(path: number[]): SourceNode | undefined {
+  let current = document.value?.root;
+  for (const index of path) current = current?.children[index];
+  return current;
+}
+function moveTurretPivot(node: SourceNode, value: [number, number, number]) {
+  if (saving.value) { status.value = '保存中，已忽略本次拖拽'; return; }
+  if (!document.value || !previewDocument.value) return;
+  const updates = turretPivotUpdates(previewDocument.value, node, value);
+  const editable = updates.map((update) => {
+    const source = composition?.editableNode(update.node); return source ? { ...update, path: sourceNodePath(source) } : undefined;
+  });
+  if (!updates.length || editable.some((update) => !update)) {
+    status.value = '该旋转中点或其关联位置继承自基础载具，无法在覆盖文件中整体修改'; rebuildPreview(); return;
+  }
+  const changed = editable.some((update) => update && document.value!.value(sourceNodeAtPath(update.path)!, update.attr) !== vec3Text(update.value));
+  if (!changed) return;
+  recordUndo();
+  for (const update of editable) {
+    if (!update) continue;
+    const source = sourceNodeAtPath(update.path); if (!source) continue;
+    const text = vec3Text(update.value);
+    if (document.value.value(source, update.attr) === undefined) document.value.addAttribute(source, update.attr, text);
+    else document.value.set(source, update.attr, text);
+  }
+  markDocumentChanged(); rebuildPreview();
+  status.value = `旋转中点 = ${vec3Text(value)}；已补偿炮塔外观、武器及直接附属对象`;
 }
 function rotateEntrance(node: SourceNode, attr: 'rotation' | 'exit_rotation', value: number) {
   if (saving.value) { status.value = '保存中，已忽略本次拖拽'; return; }
@@ -622,6 +664,10 @@ function keydown(event: KeyboardEvent) {
   const mod = event.ctrlKey || event.metaKey;
   if (!mod) return;
   const key = event.key.toLowerCase();
+  if (activeMode.value === 'render') {
+    if (key === 'o' && !event.shiftKey) { event.preventDefault(); void openVehicle(); }
+    return;
+  }
   if (event.shiftKey && key === 's') { event.preventDefault(); void save(true); return; }
   if (event.shiftKey) return;
   if (key === 'z') { event.preventDefault(); void undo(); return; }
@@ -711,10 +757,11 @@ onBeforeUnmount(() => {
 <template>
   <main class="app-shell">
     <header class="topbar">
-      <div class="brand"><strong>RWR VEHICLE STUDIO</strong><small>0.4.0 PREVIEW</small></div>
+      <div class="brand"><strong>RWR VEHICLE STUDIO</strong><small>0.5.0 PREVIEW</small></div>
       <nav>
+        <span class="mode-tabs"><button :class="{ active: activeMode === 'editor' }" @click="activeMode = 'editor'">VEHICLE 编辑器</button><button :class="{ active: activeMode === 'render' }" @click="activeMode = 'render'">ICON 渲染</button></span><span class="divider"></span>
         <button @click="openVehicle">打开载具</button><button @click="resourceDialog = true">资源文件夹</button><button @click="overrideDialog = true">文件覆盖</button><button @click="backupDialog = true">管理备份</button>
-        <span class="divider"></span><button :disabled="!canUndo" title="Ctrl+Z" @click="undo">撤销</button><button :disabled="!document || saving" class="primary" @click="save(false)">保存</button><button :disabled="!document || saving" @click="save(true)">另存为</button><button :disabled="!document" @click="reload">重新载入</button>
+        <template v-if="activeMode === 'editor'"><span class="divider"></span><button :disabled="!canUndo" title="Ctrl+Z" @click="undo">撤销</button><button :disabled="!document || saving" class="primary" @click="save(false)">保存</button><button :disabled="!document || saving" @click="save(true)">另存为</button><button :disabled="!document" @click="reload">重新载入</button></template>
       </nav>
       <div class="file-badge" :class="{ active: opened, dirty: anyDirty }"><b class="ellipsis">{{ opened?.name ?? '未打开文件' }}</b><span>{{ anyDirty ? `未保存：${dirty ? '载具' : ''}${dirty && weaponDirtyCount ? '、' : ''}${weaponDirtyCount ? `${weaponDirtyCount} 个武器` : ''}` : '磁盘同步' }}</span></div>
       <details v-if="dirtyWeaponSessions.length" class="unsaved-weapons">
@@ -729,7 +776,7 @@ onBeforeUnmount(() => {
       </details>
     </header>
 
-    <section class="workspace">
+    <section v-show="activeMode === 'editor'" class="workspace">
       <aside class="scene-panel">
         <section class="vehicle-workspace collapse-group">
           <button type="button" class="collapse-summary" @click="toggleWorkspacePanel">
@@ -769,7 +816,22 @@ onBeforeUnmount(() => {
           <Transition @enter="onCollapseEnter" @leave="onCollapseLeave">
             <div v-show="!collapsedGroups.has(group.kind)" class="collapse-body">
               <template v-for="item in group.items" :key="item.node.id">
-                <div v-if="item.kind === 'slot' && crewTreeItems(item).length" class="crew-tree-item">
+                <div v-if="item.kind === 'turret'" class="crew-tree-item turret-tree-item">
+                  <div class="crew-scene-row">
+                    <button type="button" class="crew-caret" :title="expandedTurrets.has(item.node.id) ? '折叠炮塔选项' : '展开炮塔选项'" @click="toggleTurret(item.node.id)">{{ expandedTurrets.has(item.node.id) ? '▾' : '▸' }}</button>
+                    <button class="list-item scene-item" :class="{ active: selectedId === item.node.id && !selectedTurretPivot, inherited: composition?.inherited(item.node) }" :title="composition?.inherited(item.node) ? '继承自基础载具（只读）' : '来自当前载具文件'" @click="select(item.node.id)">
+                      <span class="kind-mark">{{ item.index }}</span><span>{{ item.label }}</span><small v-if="item.meta" class="scene-meta">{{ item.meta }}</small><em v-if="composition?.inherited(item.node)">基础</em>
+                    </button>
+                  </div>
+                  <Transition @enter="onCollapseEnter" @leave="onCollapseLeave">
+                    <div v-show="expandedTurrets.has(item.node.id)" class="crew-subitems">
+                      <button class="list-item crew-subitem turret-pivot-subitem" :class="{ active: selectedId === item.node.id && selectedTurretPivot }" @click="selectTurretPivot(item)">
+                        <span class="turret-pivot-submark"></span><span>旋转中点</span>
+                      </button>
+                    </div>
+                  </Transition>
+                </div>
+                <div v-else-if="item.kind === 'slot' && crewTreeItems(item).length" class="crew-tree-item">
                   <div class="crew-scene-row">
                     <button type="button" class="crew-caret" :title="expandedCrewSlots.has(item.node.id) ? '折叠乘员位置' : '展开乘员位置'" @click="toggleCrewSlot(item.node.id)">{{ expandedCrewSlots.has(item.node.id) ? '▾' : '▸' }}</button>
                     <button class="list-item scene-item" :class="{ active: selectedId === item.node.id && !selectedEntrance, inherited: composition?.inherited(item.node) }" :title="composition?.inherited(item.node) ? '继承自基础载具（只读）' : '来自当前载具文件'" @click="select(item.node.id)">
@@ -796,8 +858,15 @@ onBeforeUnmount(() => {
       </aside>
 
       <section class="viewport-panel">
-        <EditorViewport :document="previewDocument" :catalog="catalog" :soldier="soldier" :options="options" :selected-id="selectedId" :selected-entrance="selectedEntrance" :revision="sceneRevision" :vehicle-key="opened?.path" :resource-generation="resourceGeneration" :editing-enabled="!saving" @select="select" @move="move" @rotate="rotateEntrance" @diagnostic="pushSceneDiagnostic" />
+        <EditorViewport :document="previewDocument" :catalog="catalog" :soldier="soldier" :options="options" :selected-id="selectedId" :selected-entrance="selectedEntrance" :selected-turret-pivot="selectedTurretPivot" :turret-preview-degrees="turretPreviewDegrees" :revision="sceneRevision" :vehicle-key="opened?.path" :resource-generation="resourceGeneration" :editing-enabled="!saving" @select="select" @move="move" @pivot-move="moveTurretPivot" @rotate="rotateEntrance" @diagnostic="pushSceneDiagnostic" />
         <div v-if="!document" class="viewport-empty"><b>NO VEHICLE LOADED</b><span>读取 .vehicle、OGRE .mesh 与引用纹理，在游戏外直接校准数字。</span><button class="primary" @click="openVehicle">选择载具文件</button></div>
+        <div v-if="selectedTurretPivot" class="turret-pivot-editor">
+          <b>炮塔旋转预览</b>
+          <input v-model.number="turretPreviewDegrees" type="range" min="-180" max="180" step="1" />
+          <label><input v-model.number="turretPreviewDegrees" type="number" min="-180" max="180" step="1" />°</label>
+          <button type="button" class="tiny" @click="turretPreviewDegrees = 0">归零</button>
+          <small>仅预览旋转，不写入载具文件</small>
+        </div>
         <div class="quick-options">
           <label><input v-model="options.showVisualBounds" type="checkbox" /> 外观框</label><label><input v-model="options.showBounds" type="checkbox" /> 碰撞框</label><label><input v-model="options.showShields" type="checkbox" /> 显示护盾范围</label><label><input v-model="options.showOccupants" type="checkbox" /> 乘员</label><label><input v-model="options.showOccupantPositions" type="checkbox" /> 显示乘员位置</label><label><input v-model="options.showEntrances" type="checkbox" /> 显示乘员进出范围</label><label><input v-model="options.animate" type="checkbox" /> 动画</label><label><input v-model="options.showBroken" type="checkbox" /> 损毁外观</label>
         </div>
@@ -845,6 +914,8 @@ onBeforeUnmount(() => {
         <div class="inspector-actions"><button class="small danger" :disabled="!selectedEditable" @click="deleteSelectedObject">删除对象</button><button class="small" :disabled="!selectedEditable" @click="revert">恢复本项</button><button class="small primary" :disabled="!document || saving" @click="save(false)">保存载具</button></div>
       </aside>
     </section>
+
+    <IconRenderer v-if="activeMode === 'render'" :document="previewDocument" :catalog="catalog" :revision="sceneRevision" :resource-generation="resourceGeneration" :vehicle-key="opened?.path" :vehicle-name="opened?.name" />
 
     <footer class="statusbar"><span>{{ status }}</span><span class="ellipsis">{{ opened?.path ?? '' }}</span></footer>
     <Transition name="modal" appear><ResourceDialog v-if="resourceDialog" :catalog="catalog" :support-model="supportModel" :support-animations="supportAnimations" @close="resourceDialog = false" @apply="resourcesApplied" /></Transition>

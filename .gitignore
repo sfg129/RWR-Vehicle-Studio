@@ -6,6 +6,7 @@ node_modules/
 dist/
 release/
 src-tauri/target/
+src-tauri/target-*/
 src-tauri/gen/
 
 # Test and tooling caches

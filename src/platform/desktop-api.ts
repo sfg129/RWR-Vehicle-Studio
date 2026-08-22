@@ -31,8 +31,10 @@ export const desktop = {
   chooseSupportFile: (kind: 'model' | 'animation') => invoke<string | null>('choose_support_file', { kind }),
   readBuiltinSupport: (kind: 'model' | 'animation') => invoke<string>('read_builtin_support', { kind }),
   scanFolder: (path: string, kind: ResourceKind) => invoke<ResourceFolderScan>('scan_resource_folder', { path, kind }),
+  directoryExists: (path: string) => invoke<boolean>('directory_exists', { path }),
   readText: (path: string) => invoke<string>('read_text_path', { path }),
   readBinary: async (path: string): Promise<ArrayBuffer> => decodeBase64(await invoke<string>('read_binary_base64', { path })),
+  saveRenderPng: (suggestedName: string, base64: string) => invoke<string | null>('save_render_png', { suggestedName, base64 }),
   saveVehicle: (path: string, text: string, saveAs = false) =>
     invoke<SavedFile | null>('save_vehicle', { path, text, saveAs }),
   registerVehicleSession: (path: string) => invoke<void>('register_vehicle_session', { path }),

@@ -1,6 +1,6 @@
 {
   "name": "rwr-vehicle-studio",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Offline visual vehicle editor for Running With Rifles modding workflows",
   "private": true,
   "license": "GPL-3.0-only",
@@ -17,6 +17,7 @@
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",
+    "build:portable": "tauri build --no-bundle",
     "build:frontend": "vue-tsc --noEmit && vite build",
     "test": "vitest run"
   },

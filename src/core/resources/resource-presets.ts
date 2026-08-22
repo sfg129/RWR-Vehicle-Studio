@@ -2,6 +2,8 @@ import { emptySecondaryFolders, type FolderSettings, type SecondaryFolderSetting
 
 export const BUILTIN_SUPPORT_MODEL = 'builtin://soldier/model';
 export const BUILTIN_SUPPORT_ANIMATIONS = 'builtin://soldier/animations';
+/** Low-priority stock WW2 geometry; a configured mod model folder remains the primary override source. */
+export const DEFAULT_WW2_BASE_MODEL_FOLDER = 'D:\\steam\\steamapps\\common\\RunningWithRifles\\media\\packages\\ww2_base\\models';
 
 export interface ResourceSelection {
   folders: FolderSettings;
@@ -23,7 +25,7 @@ export interface ResourcePreferences {
 
 export const DEFAULT_RESOURCE_SELECTION: ResourceSelection = {
   folders: { model: '', texture: '', weapon: '' },
-  secondaryFolders: emptySecondaryFolders(),
+  secondaryFolders: { ...emptySecondaryFolders(), model: [DEFAULT_WW2_BASE_MODEL_FOLDER] },
   supportModel: BUILTIN_SUPPORT_MODEL,
   supportAnimations: BUILTIN_SUPPORT_ANIMATIONS,
 };
@@ -100,4 +102,17 @@ function cloneSecondaryFolders(value: SecondaryFolderSettings | undefined): Seco
 }
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+export function withWw2BaseModelFallback(selection: ResourceSelection): ResourceSelection {
+  return setWw2BaseModelFallback(selection, true);
+}
+
+export function setWw2BaseModelFallback(selection: ResourceSelection, available: boolean): ResourceSelection {
+  const result = cloneResourceSelection(selection);
+  result.secondaryFolders.model = result.secondaryFolders.model.filter((path) => path.toLocaleLowerCase() !== DEFAULT_WW2_BASE_MODEL_FOLDER.toLocaleLowerCase());
+  if (available) {
+    result.secondaryFolders.model.push(DEFAULT_WW2_BASE_MODEL_FOLDER);
+  }
+  return result;
 }

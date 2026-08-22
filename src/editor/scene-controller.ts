@@ -7,19 +7,24 @@ import { DDSLoader } from 'three/examples/jsm/loaders/DDSLoader.js';
 import { TGALoader } from 'three/examples/jsm/loaders/TGALoader.js';
 import type { SourceDocument, SourceNode } from '../core/xml/source-document';
 import type { ResourceCatalog } from '../core/resources/resource-catalog';
-import { characterEntranceEdit, characterSlotHidden, characterSlotPose, characterStatePlacement, dragNeedsRebuild, editableBasisRotation, idleState, localDragValue, rotateY, SHIELD_LOGICAL_TO_MODEL_YAW, tireVisualPosition, turretWorldPose, visualMatchesDamageState, WEAPON_LOGICAL_TO_MODEL_YAW } from '../core/vehicle/vehicle-model';
+import { characterEntranceEdit, characterSlotHidden, characterSlotPose, characterStatePlacement, dragNeedsRebuild, editableBasisRotation, editablePosition, idleState, localDragValue, rotateY, SHIELD_LOGICAL_TO_MODEL_YAW, tireVisualPosition, turretWorldPose, visualMatchesDamageState, WEAPON_LOGICAL_TO_MODEL_YAW } from '../core/vehicle/vehicle-model';
 import { vec3, type Vec3 } from '../core/math';
 import { SoldierAssets, SOLDIER_GAME_SCALE, rwrLinearToDisplay, type SoldierAnimation } from '../core/soldier/soldier-assets';
 import { parseStaticVoxelModel, type StaticVoxel } from '../core/voxel/voxel-model';
+import { comparePickRank, synchronizeOffsetBindings, updateOffsetBindings, type PickRank } from './scene-interaction';
 
 export type CrewGuideKind = 'entrance' | 'leaving';
 export interface ViewOptions { showBroken: boolean; showOccupants: boolean; showOccupantPositions: boolean; showVisualBounds: boolean; showBounds: boolean; showShields: boolean; showEntrances: boolean; animate: boolean }
-interface Occupant { mesh: THREE.InstancedMesh; animation?: SoldierAnimation; assets: SoldierAssets; pose: Float32Array; dynamic: boolean }
+interface Occupant { mesh: THREE.InstancedMesh; slot: SourceNode; animation?: SoldierAnimation; assets: SoldierAssets; pose: Float32Array; dynamic: boolean }
 interface PositionDrag { kind: 'position'; node: SourceNode; attr: string; value: Vec3; start: THREE.Vector3; basisRotation: number }
+interface PivotDrag { kind: 'pivot'; node: SourceNode; value: Vec3; start: THREE.Vector3; basisRotation: number; marker: THREE.Object3D }
 type EntranceEdit = { kind: 'position'; node: SourceNode; attr: 'enter_position' | 'position'; value: Vec3 } | { kind: 'rotation'; node: SourceNode; attr: 'rotation' | 'exit_rotation'; toXmlRotation: (worldRotation: number) => number };
 interface EntranceDrag { kind: 'entrance'; edit: EntranceEdit; anchor: THREE.Vector3; handle: THREE.Mesh; guideGeometry: THREE.BufferGeometry }
-type DragInfo = PositionDrag | EntranceDrag;
+type DragInfo = PositionDrag | PivotDrag | EntranceDrag;
 interface EntranceGuide { handle: THREE.Mesh; guideGeometry: THREE.BufferGeometry; edit: EntranceEdit; anchor: THREE.Vector3 }
+interface TurretObjectBinding { object: THREE.Object3D; turretIndex: number; nodeId: number; attr: 'offset' | 'weapon_offset'; localOffset: Vec3 }
+interface SlotObjectBinding { object: THREE.Object3D; slotId: number; yOffset: number }
+interface PickCandidate extends PickRank { id: number; guide?: CrewGuideKind; hit: THREE.Intersection<THREE.Object3D> }
 
 const ASSET_CONCURRENCY = 6;
 /** Run an async task over items with a bounded number of in-flight workers (RV-027). */
@@ -38,15 +43,18 @@ export class SceneController {
   private doc?: SourceDocument; private catalog?: ResourceCatalog; private soldier?: SoldierAssets; private options?: ViewOptions;
   private meshCache = new Map<string, Promise<OgreMesh>>(); private textureCache = new Map<string, Promise<THREE.Texture>>(); private voxelCache = new Map<string, Promise<StaticVoxel[]>>(); private resolvedTextures = new Set<THREE.Texture>(); private resolvedTexturePaths = new Map<THREE.Texture, string>();
   private geometryCache = new Map<string, THREE.BufferGeometry>(); private sharedAssets = new Set<THREE.BufferGeometry | THREE.Material>();
-  private nodeObjects = new Map<number, THREE.Object3D>(); private entranceGuides = new Map<string, EntranceGuide>(); private visualObjects: THREE.Object3D[] = []; private occupants: Occupant[] = []; private startTime = performance.now();
+  private nodeObjects = new Map<number, THREE.Object3D>(); private entranceGuides = new Map<string, EntranceGuide>(); private visualObjects: THREE.Object3D[] = []; private turretObjects: TurretObjectBinding[] = []; private slotObjects: SlotObjectBinding[] = []; private occupants: Occupant[] = []; private startTime = performance.now();
+  private turrets: SourceNode[] = []; private globalOffset: Vec3 = [0, 0, 0]; private previewTurretIndex?: number; private previewRotation = 0; private pivotMarker?: THREE.Object3D;
   private sceneGeneration = 0;
   private pickTargets: THREE.Object3D[] = []; private raycaster = new THREE.Raycaster(); private pointer = new THREE.Vector2(); private frame = 0;
   private lastAnimationUpdate = -Infinity; private readonly animationIntervalMs = 50;
   private pointerDownPos = new THREE.Vector2(); private readonly pickThreshold = 5;
+  private transformPointerGesture = false;
   private resizeObserver?: ResizeObserver; private disposed = false;
   private fpsFrames = 0; private fpsStarted = performance.now();
 
   constructor(private host: HTMLElement, private onSelect: (id: number, guide?: CrewGuideKind) => void, private onMove: (node: SourceNode, attr: string, value: Vec3, needsRebuild: boolean) => void,
+    private onPivotMove: (node: SourceNode, value: Vec3) => void,
     private onRotate: (node: SourceNode, attr: 'rotation' | 'exit_rotation', value: number) => void,
     private onStats: (fps: number, dynamicOccupants: number) => void, private onDiagnostic: (message: string) => void = () => {}) {
     this.scene.background = new THREE.Color(0x0d1115); this.scene.fog = new THREE.Fog(0x0d1115, 80, 250);
@@ -59,8 +67,14 @@ export class SceneController {
     this.transform = new TransformControls(this.camera, this.renderer.domElement); this.transform.setMode('translate'); this.transform.setSize(0.75);
     this.scene.add(this.transform.getHelper()); this.scene.add(this.root);
     this.transform.addEventListener('dragging-changed', (e: any) => { this.controls.enabled = !e.value; });
-    this.transform.addEventListener('mouseDown', () => { if (this.drag?.kind === 'position') this.drag.start.copy(this.proxy.position); });
+    this.transform.addEventListener('mouseDown', () => {
+      // TransformControls clears `dragging` before the same pointerup reaches the canvas.
+      // Remember the whole gesture so releasing a gizmo cannot also select the object below it.
+      this.transformPointerGesture = true;
+      if (this.drag?.kind === 'position' || this.drag?.kind === 'pivot') this.drag.start.copy(this.proxy.position);
+    });
     this.transform.addEventListener('objectChange', () => {
+      if (this.drag?.kind === 'pivot') { this.drag.marker.position.copy(this.proxy.position); return; }
       if (this.drag?.kind !== 'entrance') return;
       const y = this.drag.handle.position.y; this.proxy.position.y = y; this.drag.handle.position.set(this.proxy.position.x, y, this.proxy.position.z);
       const positions = this.drag.guideGeometry.getAttribute('position') as THREE.BufferAttribute;
@@ -82,9 +96,14 @@ export class SceneController {
       }
       const worldDelta = this.proxy.position.clone().sub(this.drag.start);
       const value = localDragValue([worldDelta.x, worldDelta.y, worldDelta.z], this.drag.basisRotation, this.drag.value);
+      if (this.drag.kind === 'pivot') {
+        this.drag.value = value;
+        this.onPivotMove(this.drag.node, value);
+        return;
+      }
       // RV-025: when the dragged node has a direct scene object, move it in place and skip the full rebuild.
       // R3-002: turret offsets are coordinate parents for dependent objects, so a full rebuild is required.
-      if (dragNeedsRebuild(this.drag.node)) {
+      if (dragNeedsRebuild(this.drag.node, this.drag.attr)) {
         this.drag.value = value;
         this.onMove(this.drag.node, this.drag.attr, value, true);
         return;
@@ -93,28 +112,36 @@ export class SceneController {
       if (object) {
         object.position.add(worldDelta);
         this.drag.value = value;
+        updateOffsetBindings(this.turretObjects, this.drag.node.id, this.drag.attr, value);
         this.onMove(this.drag.node, this.drag.attr, value, false);
       } else {
         this.onMove(this.drag.node, this.drag.attr, value, true);
       }
     });
     this.sharedAssets.add(VOXEL_CUBE_GEOMETRY).add(OCCUPANT_MATERIAL);
-    this.renderer.domElement.addEventListener('pointerdown', (e) => { this.pointerDownPos.set(e.clientX, e.clientY); });
+    this.renderer.domElement.addEventListener('pointerdown', (e) => {
+      // Clear a gesture left behind by a pointer released outside the canvas. Capture phase
+      // runs before TransformControls marks a new gizmo gesture on this same pointerdown.
+      this.transformPointerGesture = false;
+      this.pointerDownPos.set(e.clientX, e.clientY);
+    }, true);
     this.renderer.domElement.addEventListener('pointerup', (e) => {
+      if (this.transformPointerGesture) { this.transformPointerGesture = false; return; }
       if (this.transform.dragging) return;
       if (Math.hypot(e.clientX - this.pointerDownPos.x, e.clientY - this.pointerDownPos.y) > this.pickThreshold) return;
       this.pick(e);
     });
+    this.renderer.domElement.addEventListener('pointercancel', () => { this.transformPointerGesture = false; });
     this.resizeObserver = new ResizeObserver(() => this.resize()); this.resizeObserver.observe(host);
     this.addEnvironment(); this.resetCamera(); this.loop();
   }
 
   async setDocument(doc: SourceDocument, catalog: ResourceCatalog, soldier: SoldierAssets | undefined, options: ViewOptions): Promise<void> {
     const generation = ++this.sceneGeneration;
-    this.doc = doc; this.catalog = catalog; this.soldier = soldier; this.options = options; this.transform.detach(); this.drag = undefined; this.startTime = performance.now(); this.lastAnimationUpdate = -Infinity;
+    this.doc = doc; this.catalog = catalog; this.soldier = soldier; this.options = options; this.transform.detach(); this.drag = undefined; this.transformPointerGesture = false; this.startTime = performance.now(); this.lastAnimationUpdate = -Infinity;
     this.clearRoot(); const root = doc.root; if (!root) return;
     const physics = root.children.find((n) => n.name === 'physics'); const globalOffset = vec3(physics ? doc.value(physics, 'visual_offset') : undefined);
-    const turrets = root.children.filter((n) => n.name === 'turret');
+    const turrets = root.children.filter((n) => n.name === 'turret'); this.globalOffset = globalOffset; this.turrets = turrets;
     const visuals = root.children.filter((n) => n.name === 'visual')
       .filter((visual) => visualMatchesDamageState(doc, visual, options.showBroken))
       .flatMap((visual) => {
@@ -132,12 +159,14 @@ export class SceneController {
           if (tire) origin = [globalOffset[0] + own[0] + tire[0], globalOffset[1] + own[1] + tire[1], globalOffset[2] + own[2] + tire[2]];
         }
         if (a.class === 'turret') {
-          const pose = turretWorldPose(doc, turrets, Number.parseInt(a.turret_index ?? '0', 10));
+          const turretIndex = Number.parseInt(a.turret_index ?? '0', 10);
+          const pose = turretWorldPose(doc, turrets, turretIndex);
           if (pose) {
             const rotatedOwn = rotateY(own, pose.rotation);
             origin = [globalOffset[0] + pose.position[0] + rotatedOwn[0], globalOffset[1] + pose.position[1] + rotatedOwn[1], globalOffset[2] + pose.position[2] + rotatedOwn[2]];
             object.rotation.y = pose.rotation;
           }
+          if (Number.isInteger(turretIndex) && turretIndex >= 0) this.turretObjects.push({ object, turretIndex, nodeId: visual.id, attr: 'offset', localOffset: own });
         }
         if (generation !== this.sceneGeneration) return;
         object.position.set(...origin); object.userData.nodeId = visual.id; object.traverse((o) => o.userData.nodeId = visual.id); this.root.add(object); if (options.showVisualBounds) this.pickTargets.push(object); this.nodeObjects.set(visual.id, object); this.visualObjects.push(object);
@@ -157,8 +186,19 @@ export class SceneController {
     if (generation === this.sceneGeneration) this.enforceAssetLimits();
   }
 
-  /** Refresh only the working document reference after a transform-only edit; the scene objects are updated in place (RV-025). */
-  updateDocument(doc: SourceDocument): void { this.doc = doc; }
+  /** Refresh transform caches from the newly composed working document without rebuilding GPU objects. */
+  updateDocument(doc: SourceDocument): void {
+    this.doc = doc;
+    this.turrets = doc.root?.children.filter((node) => node.name === 'turret') ?? [];
+    synchronizeOffsetBindings(doc, this.turretObjects);
+    this.applyTurretPreview();
+  }
+
+  /** Rotate the selected turret and its descendants for preview only. */
+  setTurretPreviewDegrees(value: number): void {
+    this.previewRotation = Number.isFinite(value) ? THREE.MathUtils.degToRad(value) : 0;
+    this.applyTurretPreview();
+  }
 
   /** Enable/disable gizmo editing (e.g. while a save is in flight, R4-001). */
   setEditingEnabled(enabled: boolean): void {
@@ -181,9 +221,21 @@ export class SceneController {
     this.geometryCache.clear();
   }
 
-  select(node?: SourceNode, guideKind?: CrewGuideKind): void {
+  select(node?: SourceNode, guideKind?: CrewGuideKind, turretPivot = false): void {
     this.transform.detach(); this.drag = undefined; if (this.selectedHelper) { this.root.remove(this.selectedHelper); this.selectedHelper.dispose(); this.selectedHelper = undefined; }
+    if (this.pivotMarker) { this.root.remove(this.pivotMarker); this.pivotMarker = undefined; }
+    this.previewTurretIndex = undefined; this.previewRotation = 0; this.applyTurretPreview();
     if (!node || !this.doc) return;
+    if (turretPivot && node.name === 'turret') {
+      const index = this.turrets.indexOf(node); const pose = turretWorldPose(this.doc, this.turrets, index);
+      if (index < 0 || !pose) return;
+      this.previewTurretIndex = index;
+      const world = new THREE.Vector3(this.globalOffset[0] + pose.position[0], this.globalOffset[1] + pose.position[1], this.globalOffset[2] + pose.position[2]);
+      const marker = turretPivotMarker(); marker.position.copy(world); this.root.add(marker); this.pivotMarker = marker;
+      this.proxy.position.copy(world); this.scene.add(this.proxy); this.transform.showX = true; this.transform.showY = true; this.transform.showZ = true; this.transform.attach(this.proxy);
+      this.drag = { kind: 'pivot', node, value: vec3(this.doc.value(node, 'offset')), start: world.clone(), basisRotation: editableBasisRotation(this.doc, node, 'offset'), marker };
+      return;
+    }
     if (guideKind) {
       const guide = this.entranceGuides.get(crewGuideKey(node.id, guideKind)); if (!guide) return;
       this.selectedHelper = new THREE.BoxHelper(guide.handle, 0xffd36a); this.root.add(this.selectedHelper);
@@ -198,7 +250,7 @@ export class SceneController {
     const target = editablePosition(this.doc, node); if (!target) return;
     const world = object?.position.clone() ?? new THREE.Vector3(...target.value);
     this.proxy.position.copy(world); this.scene.add(this.proxy); this.transform.attach(this.proxy);
-    const basisRotation = editableBasisRotation(this.doc, node);
+    const basisRotation = editableBasisRotation(this.doc, node, target.attr);
     this.drag = { kind: 'position', node: target.node, attr: target.attr, value: target.value, start: world.clone(), basisRotation };
   }
   dispose(): void {
@@ -214,6 +266,24 @@ export class SceneController {
   resetCamera(): void { this.camera.position.set(14, 10, 17); this.controls.target.set(0, 1.5, 0); this.controls.update(); }
   topView(): void { this.camera.position.set(0, 28, 0.01); this.controls.target.set(0, 0, 0); this.controls.update(); }
   sideView(): void { this.camera.position.set(28, 4, 0); this.controls.target.set(0, 1.5, 0); this.controls.update(); }
+
+  private applyTurretPreview(): void {
+    if (!this.doc) return;
+    const rotations = this.previewTurretIndex === undefined || this.previewRotation === 0
+      ? undefined
+      : new Map<number, number>([[this.previewTurretIndex, this.previewRotation]]);
+    for (const binding of this.turretObjects) {
+      const pose = turretWorldPose(this.doc, this.turrets, binding.turretIndex, new Set<number>(), rotations); if (!pose) continue;
+      const local = rotateY(binding.localOffset, pose.rotation);
+      binding.object.position.set(this.globalOffset[0] + pose.position[0] + local[0], this.globalOffset[1] + pose.position[1] + local[1], this.globalOffset[2] + pose.position[2] + local[2]);
+      binding.object.rotation.y = pose.rotation;
+    }
+    for (const binding of this.slotObjects) {
+      const slot = this.doc.nodes[binding.slotId]; if (!slot || slot.id !== binding.slotId) continue;
+      const pose = characterSlotPose(this.doc, slot, this.turrets, rotations);
+      binding.object.position.set(pose.position[0], pose.position[1] + binding.yOffset, pose.position[2]); binding.object.rotation.y = pose.rotation;
+    }
+  }
 
   /** Keep app-lifetime caches bounded; never evict geometries/textures used by the current scene (R3-016 / R4-009c). */
   private enforceAssetLimits(): void {
@@ -257,18 +327,18 @@ export class SceneController {
     try {
       const pose = turretWorldPose(this.doc, this.doc.root?.children.filter((n) => n.name === 'turret') ?? [], index);
       if (!pose) return;
-      const group = new THREE.Group(); const weaponOffset = vec3(a.weapon_offset);
-      group.position.set(global[0] + pose.position[0], global[1] + pose.position[1], global[2] + pose.position[2]); group.rotation.y = pose.rotation;
+      const group = new THREE.Group(); const weaponOffset = vec3(a.weapon_offset); const rotatedWeaponOffset = rotateY(weaponOffset, pose.rotation);
+      group.position.set(global[0] + pose.position[0] + rotatedWeaponOffset[0], global[1] + pose.position[1] + rotatedWeaponOffset[1], global[2] + pose.position[2] + rotatedWeaponOffset[2]); group.rotation.y = pose.rotation;
       if (weapon.mesh) {
         const path = this.catalog.resolve(weapon.mesh, 'model');
-        if (path) { const mesh = await this.loadMesh(path); if (generation !== this.sceneGeneration) return; const object = await this.buildMeshWithTextures(path, mesh, weapon.texture ? [weapon.texture] : [], generation); if (generation !== this.sceneGeneration) return; object.position.set(...weaponOffset); group.add(object); }
+        if (path) { const mesh = await this.loadMesh(path); if (generation !== this.sceneGeneration) return; const object = await this.buildMeshWithTextures(path, mesh, weapon.texture ? [weapon.texture] : [], generation); if (generation !== this.sceneGeneration) return; group.add(object); }
       }
       if (weapon.voxelModel) {
         const path = this.catalog.resolve(weapon.voxelModel, 'model');
-        if (path) { const voxels = await this.loadVoxels(path); if (generation !== this.sceneGeneration) return; const object = this.buildVoxelModel(voxels); object.position.set(...weaponOffset); object.rotation.y = WEAPON_LOGICAL_TO_MODEL_YAW; group.add(object); }
+        if (path) { const voxels = await this.loadVoxels(path); if (generation !== this.sceneGeneration) return; const object = this.buildVoxelModel(voxels); object.rotation.y = WEAPON_LOGICAL_TO_MODEL_YAW; group.add(object); }
       }
       if (this.options?.showShields) {
-        const shieldFrame = new THREE.Group(); shieldFrame.position.set(...weaponOffset); shieldFrame.rotation.y = SHIELD_LOGICAL_TO_MODEL_YAW;
+        const shieldFrame = new THREE.Group(); shieldFrame.rotation.y = SHIELD_LOGICAL_TO_MODEL_YAW;
         for (const shield of weapon.shields) {
           if (!shield.extent.some((value) => Math.abs(value) > 0)) continue;
           const geometry = new THREE.BoxGeometry(Math.abs(shield.extent[0]), Math.abs(shield.extent[1]), Math.abs(shield.extent[2]));
@@ -278,7 +348,7 @@ export class SceneController {
         if (shieldFrame.children.length) group.add(shieldFrame);
       }
       if (!group.children.length) return;
-      group.userData.nodeId = turret.id; group.traverse((object) => object.userData.nodeId = turret.id); this.root.add(group); if (this.options?.showVisualBounds) this.pickTargets.push(group); this.nodeObjects.set(turret.id, group);
+      group.userData.nodeId = turret.id; group.traverse((object) => object.userData.nodeId = turret.id); this.root.add(group); if (this.options?.showVisualBounds) this.pickTargets.push(group); this.nodeObjects.set(turret.id, group); this.turretObjects.push({ object: group, turretIndex: index, nodeId: turret.id, attr: 'weapon_offset', localOffset: weaponOffset });
     } catch (error) { console.warn(`武器模型加载失败：${weapon.mesh ?? weapon.voxelModel ?? a.weapon_key}`, error); this.onDiagnostic(`武器模型加载失败：${weapon.mesh ?? weapon.voxelModel ?? a.weapon_key}`); }
   }
 
@@ -307,7 +377,7 @@ export class SceneController {
     const animation = this.soldier.animation(ia.animation_id ?? a.animation_id, ia.animation_key ?? a.animation_key); const poseBuffer = this.soldier.createPoseBuffer();
     const matrices = mesh.instanceMatrix.array as Float32Array; this.soldier.initializeInstanceMatrices(matrices); this.soldier.sampleInto(animation, 0, poseBuffer); this.soldier.writePoseMatrices(poseBuffer, matrices); mesh.instanceMatrix.needsUpdate = true;
     mesh.userData.nodeId = slot.id; this.root.add(mesh); this.nodeObjects.set(slot.id, mesh);
-    this.occupants.push({ mesh, animation, assets: this.soldier, pose: poseBuffer, dynamic: !this.soldier.isStatic(animation) });
+    this.occupants.push({ mesh, slot, animation, assets: this.soldier, pose: poseBuffer, dynamic: !this.soldier.isStatic(animation) }); this.slotObjects.push({ object: mesh, slotId: slot.id, yOffset: 0 });
   }
 
   private addOccupantPositionMarker(slot: SourceNode, turrets: SourceNode[]): void {
@@ -316,7 +386,7 @@ export class SceneController {
     const marker = occupantBox(0xf1c84b, 0.08); marker.position.set(pose.position[0], pose.position[1] + OCCUPANT_BOX_HEIGHT / 2, pose.position[2]);
     marker.rotation.y = pose.rotation; marker.add(facingArrow(0xf1c84b));
     marker.userData.nodeId = slot.id; marker.traverse((object) => object.userData.nodeId = slot.id);
-    this.root.add(marker); this.pickTargets.push(marker);
+    this.root.add(marker); this.pickTargets.push(marker); this.slotObjects.push({ object: marker, slotId: slot.id, yOffset: OCCUPANT_BOX_HEIGHT / 2 });
   }
 
   private visibleVehicleBounds(): THREE.Box3 {
@@ -443,7 +513,7 @@ export class SceneController {
     const axes = new THREE.AxesHelper(3); this.scene.add(axes);
   }
   private clearRoot(): void {
-    this.occupants = []; this.pickTargets = []; this.nodeObjects.clear(); this.entranceGuides.clear(); this.visualObjects = [];
+    this.occupants = []; this.pickTargets = []; this.nodeObjects.clear(); this.entranceGuides.clear(); this.visualObjects = []; this.turretObjects = []; this.slotObjects = []; this.pivotMarker = undefined; this.previewTurretIndex = undefined; this.previewRotation = 0;
     while (this.root.children.length) {
       const child = this.root.children.pop()!;
       child.traverse((o: any) => {
@@ -454,7 +524,33 @@ export class SceneController {
     }
   }
   private resize(): void { const w = this.host.clientWidth, h = this.host.clientHeight; if (!w || !h) return; this.camera.aspect = w / h; this.camera.updateProjectionMatrix(); this.renderer.setSize(w, h, false); }
-  private pick(e: PointerEvent): void { if (this.transform.dragging) return; const r = this.renderer.domElement.getBoundingClientRect(); this.pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1); this.raycaster.setFromCamera(this.pointer, this.camera); const hit = this.raycaster.intersectObjects(this.pickTargets, true).find((x) => findNodeId(x.object) !== undefined); const id = hit ? findNodeId(hit.object) : undefined; if (id !== undefined) this.onSelect(id, findCrewGuideKind(hit!.object)); }
+  private pick(e: PointerEvent): void {
+    if (this.transform.dragging || !this.doc) return;
+    const r = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const candidates = new Map<string, PickCandidate>();
+    for (const hit of this.raycaster.intersectObjects(this.pickTargets, true)) {
+      const id = findNodeId(hit.object); if (id === undefined) continue;
+      const guide = findCrewGuideKind(hit.object); const key = `${id}:${guide ?? ''}`;
+      if (candidates.has(key)) continue;
+      const node = this.doc.nodes[id]; if (!node || node.id !== id) continue;
+      const object = this.nodeObjects.get(id) ?? hit.object;
+      const size = new THREE.Box3().setFromObject(object).getSize(new THREE.Vector3());
+      const volume = Math.max(0.000001, Math.abs(size.x * size.y * size.z));
+      const priority = guide ? 400
+        : node.name === 'turret' ? 300
+          : node.name === 'character_slot' ? 250
+            : node.name === 'visual' && this.doc.value(node, 'class') === 'turret' ? 200
+              : node.name === 'visual' ? 100 : 150;
+      candidates.set(key, { id, guide, hit, priority, volume, distance: hit.distance });
+    }
+    const all = [...candidates.values()]; if (!all.length) return;
+    // Do not select an editable target hidden deep behind the vehicle; only arbitrate nearby overlaps.
+    const nearestDistance = Math.min(...all.map((candidate) => candidate.distance));
+    const selected = all.filter((candidate) => candidate.distance <= nearestDistance + 0.75).sort(comparePickRank)[0];
+    if (selected) this.onSelect(selected.id, selected.guide);
+  }
   private loop = (): void => {
     if (this.disposed) return;
     this.frame = requestAnimationFrame(this.loop); this.controls.update(); const now = performance.now();
@@ -474,6 +570,19 @@ export class SceneController {
 
 const OCCUPANT_BOX_HALF_WIDTH = 0.42;
 const OCCUPANT_BOX_HEIGHT = 1.75;
+function turretPivotMarker(): THREE.Group {
+  const group = new THREE.Group();
+  const material = new THREE.MeshBasicMaterial({ color: 0xffc247, depthTest: false, transparent: true, opacity: 0.95 });
+  const center = new THREE.Mesh(new THREE.SphereGeometry(0.11, 12, 8), material); center.renderOrder = 10; group.add(center);
+  const ringMaterial = new THREE.LineBasicMaterial({ color: 0xffc247, depthTest: false, transparent: true, opacity: 0.9 });
+  for (const rotation of [[Math.PI / 2, 0, 0], [0, 0, 0]] as const) {
+    const points = Array.from({ length: 49 }, (_, index) => {
+      const angle = index / 48 * Math.PI * 2; return new THREE.Vector3(Math.cos(angle) * 0.34, 0, Math.sin(angle) * 0.34);
+    });
+    const ring = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), ringMaterial); ring.rotation.set(rotation[0], rotation[1], rotation[2]); ring.renderOrder = 10; group.add(ring);
+  }
+  return group;
+}
 function occupantBox(color: number, opacity: number): THREE.Mesh {
   const geometry = new THREE.BoxGeometry(OCCUPANT_BOX_HALF_WIDTH * 2, OCCUPANT_BOX_HEIGHT, OCCUPANT_BOX_HALF_WIDTH * 2);
   const box = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false }));
@@ -516,11 +625,6 @@ function createOccupantMaterial(): THREE.ShaderMaterial {
   });
 }
 
-function editablePosition(doc: SourceDocument, node: SourceNode): { node: SourceNode; attr: string; value: Vec3 } | null {
-  const idle = node.name === 'character_slot' ? idleState(doc, node) : undefined; if (idle && doc.value(idle, 'position') !== undefined) return { node: idle, attr: 'position', value: vec3(doc.value(idle, 'position')) };
-  const attrs = node.name === 'physics' ? ['collision_model_pos', 'visual_offset', 'offset'] : node.name === 'character_slot' ? ['seat_position', 'position', 'enter_position'] : ['offset'];
-  for (const attr of attrs) if (doc.value(node, attr) !== undefined) return { node, attr, value: vec3(doc.value(node, attr)) }; return null;
-}
 function findNodeId(object: THREE.Object3D): number | undefined { let o: THREE.Object3D | null = object; while (o) { if (typeof o.userData.nodeId === 'number') return o.userData.nodeId; o = o.parent; } return undefined; }
 function crewGuideKey(slotId: number, kind: CrewGuideKind): string { return `${slotId}:${kind}`; }
 function findCrewGuideKind(object: THREE.Object3D): CrewGuideKind | undefined { let o: THREE.Object3D | null = object; while (o) { if (o.userData.crewGuideKind === 'entrance' || o.userData.crewGuideKind === 'leaving') return o.userData.crewGuideKind; o = o.parent; } return undefined; }

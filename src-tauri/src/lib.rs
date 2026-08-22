@@ -416,6 +416,33 @@ fn read_binary_base64(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn directory_exists(path: String) -> bool { Path::new(&path).is_dir() }
+
+#[tauri::command]
+async fn save_render_png(app: AppHandle, suggested_name: String, base64: String) -> Result<Option<String>, String> {
+    let safe_name = Path::new(&suggested_name).file_name().and_then(|value| value.to_str()).unwrap_or("vehicle-icon.png");
+    let default_name = if safe_name.to_ascii_lowercase().ends_with(".png") { safe_name.to_string() } else { format!("{safe_name}.png") };
+    let picked = receive_file(|done| {
+        app.dialog().file().add_filter("PNG 图像", &["png"]).set_file_name(&default_name).save_file(done);
+    }).await?;
+    let Some(picked) = picked else { return Ok(None) };
+    let mut path = local_path(picked)?;
+    match path.extension().and_then(|value| value.to_str()) {
+        None => { path.set_extension("png"); }
+        Some(extension) if extension.eq_ignore_ascii_case("png") => {}
+        Some(_) => return Err("渲染结果只能保存为 .png 文件".into()),
+    }
+    let bytes = STANDARD.decode(base64.as_bytes()).map_err(|error| format!("PNG 数据解码失败：{error}"))?;
+    if !bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Err("渲染结果不是有效的 PNG 数据".into());
+    }
+    let parent = path.parent().ok_or_else(|| "导出路径没有父目录".to_string())?;
+    if !parent.is_dir() { return Err("导出目录不存在".into()) }
+    fs::write(&path, bytes).map_err(|error| format!("写入 PNG 失败：{error}"))?;
+    Ok(Some(display(&path)))
+}
+
+#[tauri::command]
 async fn save_vehicle(app: AppHandle, state: State<'_, AppState>, path: String, text: String, save_as: bool) -> Result<Option<SavedFile>, String> {
     let target = if save_as {
         let default_name = Path::new(&path).file_name().and_then(|v| v.to_str()).unwrap_or("edited.vehicle").to_string();
@@ -802,7 +829,7 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![open_vehicle, open_vehicle_path, resolve_vehicle_base, choose_vehicle_base, choose_vehicle_workspace, scan_vehicle_workspace, scan_vehicle_schema, list_workspace_dir,
             choose_folder, choose_override_file, choose_support_file,
-            scan_resource_folder, read_text_path, read_builtin_support, read_binary_base64, save_vehicle, register_vehicle_session, register_weapon_session, save_weapon,
+            scan_resource_folder, read_text_path, read_builtin_support, read_binary_base64, directory_exists, save_render_png, save_vehicle, register_vehicle_session, register_weapon_session, save_weapon,
             list_backups, read_backup, restore_backup, delete_backups])
         .run(tauri::generate_context!())
         .expect("RWR Vehicle Studio failed to start");

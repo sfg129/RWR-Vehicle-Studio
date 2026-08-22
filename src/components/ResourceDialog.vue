@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import { desktop, type ResourceKind } from '../platform/desktop-api';
 import { StaleResourceApplyError, type ResourceCatalog } from '../core/resources/resource-catalog';
 import {
@@ -10,6 +10,8 @@ import {
   loadResourcePreferences,
   presetId,
   saveResourcePreferences,
+  DEFAULT_WW2_BASE_MODEL_FOLDER,
+  setWw2BaseModelFallback,
   type ResourcePreset,
   type ResourceSelection,
 } from '../core/resources/resource-presets';
@@ -82,7 +84,9 @@ function assignSecondaryDraft(paths: ResourceSelection['secondaryFolders']) {
 }
 async function apply() {
   const token = ++applyToken;
-  const selection = cloneResourceSelection(currentSelection());
+  const fallbackAvailable = await desktop.directoryExists(DEFAULT_WW2_BASE_MODEL_FOLDER);
+  if (token !== applyToken) return;
+  const selection = setWw2BaseModelFallback(currentSelection(), fallbackAvailable);
 
   indexing.value = true; busy.value = '正在递归建立资源索引…';
   try {
@@ -97,6 +101,10 @@ async function apply() {
       : `载入失败：${error instanceof Error ? error.message : String(error)}`;
   } finally { if (token === applyToken) indexing.value = false; }
 }
+onMounted(async () => {
+  if (await desktop.directoryExists(DEFAULT_WW2_BASE_MODEL_FOLDER)) return;
+  secondaryFolders.model.splice(0, secondaryFolders.model.length, ...secondaryDraft(secondaryFolders.model.filter((path) => path.toLocaleLowerCase() !== DEFAULT_WW2_BASE_MODEL_FOLDER.toLocaleLowerCase())));
+});
 </script>
 <template>
   <div class="modal-backdrop"><section class="dialog resource-dialog">
