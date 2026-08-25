@@ -51,10 +51,15 @@ describe('独立图标渲染工作流', () => {
       const offset = (y * 6 + x) * 4; pixels[offset] = 255; pixels[offset + 1] = 255; pixels[offset + 2] = 255;
     }
     expect(foregroundPixelBounds(pixels, 6, 5, [255, 0, 255])).toEqual({ x: 2, y: 1, width: 2, height: 3 });
-    const output = fittedIconOutputRect({ x: 0, y: 0, width: 200, height: 100 }, 512, 0.1);
+    // Source x/y intentionally simulate a vehicle rendered far away from the
+    // source canvas center. Placement depends only on its visible bounds size,
+    // so the cropped icon is re-centered in the exported square.
+    const output = fittedIconOutputRect({ x: 173, y: 311, width: 200, height: 100 }, 512, 0.1);
     expect(output.width).toBeCloseTo(426.667, 2);
     expect(output.height).toBeCloseTo(213.333, 2);
     expect(output.x).toBeCloseTo(42.667, 2);
     expect(output.y).toBeCloseTo(149.333, 2);
+    expect(output.x + output.width / 2).toBeCloseTo(256, 5);
+    expect(output.y + output.height / 2).toBeCloseTo(256, 5);
   });
 });

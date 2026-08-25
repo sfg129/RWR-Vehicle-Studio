@@ -252,13 +252,15 @@ export class IconRenderController {
       const bounds = foregroundBoundsFromCanvas(this.renderer.domElement, measurementBackground);
       if (!bounds) throw new Error('导出画面中没有检测到载具像素');
 
-      this.renderNow(this.exportCamera, this.settings.background);
+      // The preview deliberately uses a solid background, but exported map icons
+      // must preserve only the model coverage. Black model pixels remain opaque;
+      // pixels outside the vehicle become transparent RGBA pixels.
+      this.renderNow(this.exportCamera, this.settings.background, true);
       const output = document.createElement('canvas');
       output.width = size; output.height = size;
       const context = output.getContext('2d');
       if (!context) throw new Error('无法创建 PNG 二维输出画布');
-      context.fillStyle = this.settings.background;
-      context.fillRect(0, 0, size, size);
+      context.clearRect(0, 0, size, size);
       context.imageSmoothingEnabled = true;
       context.imageSmoothingQuality = 'high';
       const source = expandedPixelBounds(bounds, renderSize, renderSize, 2);
@@ -493,15 +495,16 @@ export class IconRenderController {
     this.frame = requestAnimationFrame(() => { this.frame = 0; this.renderNow(); });
   }
 
-  private renderNow(modelCamera: THREE.PerspectiveCamera = this.camera, background = this.settings.background): void {
+  private renderNow(modelCamera: THREE.PerspectiveCamera = this.camera, background = this.settings.background, transparentOutput = false): void {
     if (this.disposed) return;
     this.postMaterial.uniforms.background.value.set(background);
+    this.postMaterial.uniforms.transparentOutput.value = transparentOutput ? 1 : 0;
     this.renderer.setRenderTarget(this.target);
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.clear(true, true, true);
     this.renderer.render(this.modelScene, modelCamera);
     this.renderer.setRenderTarget(null);
-    this.renderer.setClearColor(background, 1);
+    this.renderer.setClearColor(transparentOutput ? 0x000000 : background, transparentOutput ? 0 : 1);
     this.renderer.clear(true, true, true);
     this.renderer.render(this.outputScene, this.outputCamera);
   }
@@ -529,6 +532,7 @@ function createPostMaterial(texture: THREE.Texture, settings: IconRenderSettings
       sourceTexture: { value: texture },
       threshold: { value: settings.threshold },
       background: { value: new THREE.Color(settings.background) },
+      transparentOutput: { value: 0 },
     },
     vertexShader: `
       varying vec2 vUv;
@@ -538,13 +542,18 @@ function createPostMaterial(texture: THREE.Texture, settings: IconRenderSettings
       uniform sampler2D sourceTexture;
       uniform float threshold;
       uniform vec3 background;
+      uniform float transparentOutput;
       varying vec2 vUv;
       void main() {
         vec4 source = texture2D(sourceTexture, vUv);
         float luminance = dot(source.rgb, vec3(0.2126, 0.7152, 0.0722));
         vec3 binaryColor = vec3(step(threshold, luminance));
         float coverage = smoothstep(0.02, 0.98, source.a);
-        gl_FragColor = vec4(mix(background, binaryColor, coverage), 1.0);
+        if (transparentOutput > 0.5) {
+          gl_FragColor = vec4(binaryColor, coverage);
+        } else {
+          gl_FragColor = vec4(mix(background, binaryColor, coverage), 1.0);
+        }
       }
     `,
     depthTest: false,
