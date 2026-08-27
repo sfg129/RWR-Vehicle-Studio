@@ -5,6 +5,7 @@ import IconRenderer from './components/IconRenderer.vue';
 import ResourceDialog from './components/ResourceDialog.vue';
 import OverrideDialog from './components/OverrideDialog.vue';
 import BackupManagerDialog from './components/BackupManagerDialog.vue';
+import MapObjectEditor from './components/MapObjectEditor.vue';
 import { desktop, type BackupRestoreResult, type OpenedFile, type VehicleSchema, type VehicleWorkspace, type VehicleWorkspaceEntry } from './platform/desktop-api';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog';
@@ -58,7 +59,8 @@ interface WeaponSession { key: string; path: string; name: string; document: Sou
 const weaponSessions = new Map<string, WeaponSession>(); const weaponSession = ref<WeaponSession>(); const weaponLoadError = ref(''); const weaponRevision = ref(0); const weaponDirtyCount = ref(0);
 const lastEditedDoc = ref<'vehicle' | string>('vehicle');
 const saving = ref(false);
-const activeMode = ref<'editor' | 'render'>('editor');
+const activeMode = ref<'editor' | 'render' | 'map'>('editor');
+const mapDirty = ref(false);
 
 // 灾难关闭快速备份：脏状态确认退出时写入 localStorage，下次启动提示恢复。
 const RECOVERY_KEY = 'rwr-vehicle-studio.recovery.v1';
@@ -158,7 +160,7 @@ const rootFields = computed(() => {
 });
 const dirty = createDirtyComputed(documentRevision, document, savedText);
 const weaponDirty = computed(() => { void weaponRevision.value; return !!weaponSession.value && weaponSession.value.document.serialize() !== weaponSession.value.savedText; });
-const anyDirty = computed(() => dirty.value || weaponDirtyCount.value > 0);
+const anyDirty = computed(() => dirty.value || weaponDirtyCount.value > 0 || mapDirty.value);
 const dirtyWeaponSessions = computed(() => { void weaponRevision.value; return [...weaponSessions.values()].filter((session) => session.document.serialize() !== session.savedText); });
 const weaponShields = computed(() => { void weaponRevision.value; const session = weaponSession.value; if (!session) return []; return session.document.descendants('shield').map((node, index) => ({ node, index, offset: session.document.value(node, 'offset') ?? '', extent: session.document.value(node, 'extent') ?? '' })); });
 const canUndo = computed(() => {
@@ -664,6 +666,7 @@ function keydown(event: KeyboardEvent) {
   const mod = event.ctrlKey || event.metaKey;
   if (!mod) return;
   const key = event.key.toLowerCase();
+  if (activeMode.value === 'map') return;
   if (activeMode.value === 'render') {
     if (key === 'o' && !event.shiftKey) { event.preventDefault(); void openVehicle(); }
     return;
@@ -757,14 +760,15 @@ onBeforeUnmount(() => {
 <template>
   <main class="app-shell">
     <header class="topbar">
-      <div class="brand"><strong>RWR VEHICLE STUDIO</strong><small>0.6.0 PREVIEW</small></div>
+      <div class="brand"><strong>RWR VEHICLE STUDIO</strong><small>0.6.1 PREVIEW</small></div>
       <nav>
-        <span class="mode-tabs"><button :class="{ active: activeMode === 'editor' }" @click="activeMode = 'editor'">VEHICLE 编辑器</button><button :class="{ active: activeMode === 'render' }" @click="activeMode = 'render'">ICON 渲染</button></span><span class="divider"></span>
-        <button @click="openVehicle">打开载具</button><button @click="resourceDialog = true">资源文件夹</button><button @click="overrideDialog = true">文件覆盖</button><button @click="backupDialog = true">管理备份</button>
+        <span class="mode-tabs"><button :class="{ active: activeMode === 'editor' }" @click="activeMode = 'editor'">VEHICLE 编辑器</button><button :class="{ active: activeMode === 'render' }" @click="activeMode = 'render'">ICON 渲染</button><button :class="{ active: activeMode === 'map' }" @click="activeMode = 'map'">MAP 对象</button></span><span class="divider"></span>
+        <template v-if="activeMode !== 'map'"><button @click="openVehicle">打开载具</button><button @click="resourceDialog = true">资源文件夹</button><button @click="overrideDialog = true">文件覆盖</button><button @click="backupDialog = true">管理备份</button></template>
         <template v-if="activeMode === 'editor'"><span class="divider"></span><button :disabled="!canUndo" title="Ctrl+Z" @click="undo">撤销</button><button :disabled="!document || saving" class="primary" @click="save(false)">保存</button><button :disabled="!document || saving" @click="save(true)">另存为</button><button :disabled="!document" @click="reload">重新载入</button></template>
       </nav>
-      <div class="file-badge" :class="{ active: opened, dirty: anyDirty }"><b class="ellipsis">{{ opened?.name ?? '未打开文件' }}</b><span>{{ anyDirty ? `未保存：${dirty ? '载具' : ''}${dirty && weaponDirtyCount ? '、' : ''}${weaponDirtyCount ? `${weaponDirtyCount} 个武器` : ''}` : '磁盘同步' }}</span></div>
-      <details v-if="dirtyWeaponSessions.length" class="unsaved-weapons">
+      <div v-if="activeMode !== 'map'" class="file-badge" :class="{ active: opened, dirty: anyDirty }"><b class="ellipsis">{{ opened?.name ?? '未打开文件' }}</b><span>{{ anyDirty ? `未保存：${dirty ? '载具' : ''}${dirty && weaponDirtyCount ? '、' : ''}${weaponDirtyCount ? `${weaponDirtyCount} 个武器` : ''}` : '磁盘同步' }}</span></div>
+      <div v-else class="file-badge active" :class="{ dirty: mapDirty }"><b>MAP OBJECT STUDIO</b><span>{{ mapDirty ? 'objects.svg 未保存' : '地图对象模式' }}</span></div>
+      <details v-if="activeMode !== 'map' && dirtyWeaponSessions.length" class="unsaved-weapons">
         <summary>未保存武器 {{ dirtyWeaponSessions.length }}</summary>
         <div class="unsaved-weapons-list">
           <div class="unsaved-weapons-toolbar"><button class="small primary" :disabled="saving" @click="saveAllWeapons">全部保存</button><button class="small" @click="discardAllWeapons">全部放弃</button></div>
@@ -916,8 +920,9 @@ onBeforeUnmount(() => {
     </section>
 
     <IconRenderer v-if="activeMode === 'render'" :document="previewDocument" :catalog="catalog" :revision="sceneRevision" :resource-generation="resourceGeneration" :vehicle-key="opened?.path" :vehicle-name="opened?.name" />
+    <MapObjectEditor v-if="activeMode === 'map'" @dirty-change="mapDirty = $event" />
 
-    <footer class="statusbar"><span>{{ status }}</span><span class="ellipsis">{{ opened?.path ?? '' }}</span></footer>
+    <footer v-if="activeMode !== 'map'" class="statusbar"><span>{{ status }}</span><span class="ellipsis">{{ opened?.path ?? '' }}</span></footer>
     <Transition name="modal" appear><ResourceDialog v-if="resourceDialog" :catalog="catalog" :support-model="supportModel" :support-animations="supportAnimations" @close="resourceDialog = false" @apply="resourcesApplied" /></Transition>
     <Transition name="modal" appear><OverrideDialog v-if="overrideDialog" :catalog="catalog" @close="overrideDialog = false" @changed="overrideChanged" /></Transition>
     <Transition name="modal" appear><BackupManagerDialog v-if="backupDialog" :roots="backupRoots" @close="backupDialog = false" @restored="backupRestored" /></Transition>

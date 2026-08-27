@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { SourceDocument } from '../src/core/xml/source-document';
-import { fittedIconOutputRect, foregroundPixelBounds, iconRenderParts } from '../src/editor/icon-render-controller';
+import { anchoredIconOutputRect, containVisibleIconRect, denseForegroundPixelBounds, fittedIconOutputRect, foregroundPixelBounds, iconRenderParts } from '../src/editor/icon-render-controller';
 import { DEFAULT_ICON_RENDER_SETTINGS, normalizeIconRenderSettings } from '../src/core/icon-render/icon-render-presets';
 import { DEFAULT_RESOURCE_SELECTION, DEFAULT_WW2_BASE_MODEL_FOLDER, setWw2BaseModelFallback } from '../src/core/resources/resource-presets';
 
@@ -21,6 +21,7 @@ describe('独立图标渲染工作流', () => {
 
   it('对读取到的预设做边界归一化，避免无效参数破坏相机或导出', () => {
     expect(DEFAULT_ICON_RENDER_SETTINGS.cameraFov).toBe(90);
+    expect(DEFAULT_ICON_RENDER_SETTINGS.framingMode).toBe('body');
     expect(DEFAULT_ICON_RENDER_SETTINGS.outputSize).toBe(512);
     const settings = normalizeIconRenderSettings({
       cameraElevation: 200,
@@ -36,6 +37,31 @@ describe('独立图标渲染工作流', () => {
     expect(settings.ambient).toBe(DEFAULT_ICON_RENDER_SETTINGS.ambient);
     expect(settings.outputSize).toBe(512);
     expect(settings.background).toBe('#181818');
+  });
+
+  it('主体定标忽略稀疏长炮管，并用主体中心放置完整画面', () => {
+    const width = 12, height = 10;
+    const pixels = new Uint8ClampedArray(width * height * 4);
+    for (let index = 0; index < pixels.length; index += 4) { pixels[index] = 255; pixels[index + 2] = 255; pixels[index + 3] = 255; }
+    // 6x5 body plus a one-pixel antenna and a one-pixel barrel.
+    for (let y = 4; y <= 8; y++) for (let x = 3; x <= 8; x++) {
+      const offset = (y * width + x) * 4; pixels[offset] = 255; pixels[offset + 1] = 255; pixels[offset + 2] = 255;
+    }
+    for (const [x, y] of [[5, 0], [5, 1], [5, 2], [5, 3], [9, 4], [10, 4], [11, 4]]) {
+      const offset = (y * width + x) * 4; pixels[offset] = 255; pixels[offset + 1] = 255; pixels[offset + 2] = 255;
+    }
+    expect(denseForegroundPixelBounds(pixels, width, height, [255, 0, 255], 0.25)).toEqual({ x: 3, y: 4, width: 6, height: 5 });
+    const destinationAnchor = fittedIconOutputRect({ x: 3, y: 4, width: 6, height: 5 }, 120, 0);
+    const destination = anchoredIconOutputRect({ x: 3, y: 4, width: 6, height: 5 }, destinationAnchor, width, height);
+    expect(destination.width).toBeCloseTo(240);
+    expect(destination.height).toBeCloseTo(200);
+    expect(destinationAnchor.x + destinationAnchor.width / 2).toBeCloseTo(60);
+    expect(destination.x + (3 + 3) * 20).toBeCloseTo(60);
+    const contained = containVisibleIconRect({ x: 30, y: 0, width: 120, height: 100 }, { x: 0, y: 0, width: 10, height: 9 }, width, height, 120, 1);
+    // The full silhouette fits horizontally after a minimal left shift, so the
+    // body is not scaled down merely to accommodate its right-side barrel.
+    expect(contained.x).toBeCloseTo(19);
+    expect(contained.width).toBeCloseTo(120);
   });
 
   it('默认把实际 ww2_base 模型目录置于模组主模型目录之后', () => {

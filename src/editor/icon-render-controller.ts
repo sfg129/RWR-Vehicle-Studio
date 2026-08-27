@@ -249,8 +249,25 @@ export class IconRenderController {
       // before the final capture.
       const measurementBackground = '#ff00ff';
       this.renderNow(this.exportCamera, measurementBackground);
-      const bounds = foregroundBoundsFromCanvas(this.renderer.domElement, measurementBackground);
-      if (!bounds) throw new Error('导出画面中没有检测到载具像素');
+      const fullBounds = foregroundBoundsFromCanvas(this.renderer.domElement, measurementBackground);
+      if (!fullBounds) throw new Error('导出画面中没有检测到载具像素');
+
+      // Long barrels and antennas must not decide the apparent vehicle size. In
+      // body framing mode, hide weapon models for a second measurement pass and
+      // reject sparse rows/columns left by thin details embedded in visual meshes.
+      // The final render below still contains every part; only its scale/anchor
+      // comes from the compact vehicle body.
+      let anchorBounds = fullBounds;
+      if (this.settings.framingMode === 'body') {
+        const weapons = this.bindings.filter((binding) => binding.kind === 'weapon').map((binding) => binding.object);
+        for (const weapon of weapons) weapon.visible = false;
+        try {
+          this.renderNow(this.exportCamera, measurementBackground);
+          anchorBounds = foregroundDenseBoundsFromCanvas(this.renderer.domElement, measurementBackground) ?? fullBounds;
+        } finally {
+          for (const weapon of weapons) weapon.visible = true;
+        }
+      }
 
       // The preview deliberately uses a solid background, but exported map icons
       // must preserve only the model coverage. Black model pixels remain opaque;
@@ -263,9 +280,17 @@ export class IconRenderController {
       context.clearRect(0, 0, size, size);
       context.imageSmoothingEnabled = true;
       context.imageSmoothingQuality = 'high';
-      const source = expandedPixelBounds(bounds, renderSize, renderSize, 2);
-      const destination = fittedIconOutputRect(source, size, this.settings.padding);
-      context.drawImage(this.renderer.domElement, source.x, source.y, source.width, source.height, destination.x, destination.y, destination.width, destination.height);
+      if (this.settings.framingMode === 'body') {
+        const anchor = expandedPixelBounds(anchorBounds, renderSize, renderSize, 2);
+        const destinationAnchor = fittedIconOutputRect(anchor, size, this.settings.padding);
+        const anchoredDestination = anchoredIconOutputRect(anchor, destinationAnchor, renderSize, renderSize);
+        const destination = containVisibleIconRect(anchoredDestination, fullBounds, renderSize, renderSize, size, 1);
+        context.drawImage(this.renderer.domElement, 0, 0, renderSize, renderSize, destination.x, destination.y, destination.width, destination.height);
+      } else {
+        const source = expandedPixelBounds(fullBounds, renderSize, renderSize, 2);
+        const destination = fittedIconOutputRect(source, size, this.settings.padding);
+        context.drawImage(this.renderer.domElement, source.x, source.y, source.width, source.height, destination.x, destination.y, destination.width, destination.height);
+      }
       const dataUrl = output.toDataURL('image/png');
       const separator = dataUrl.indexOf(',');
       if (separator < 0) throw new Error('浏览器没有返回有效的 PNG Data URL');
@@ -639,6 +664,75 @@ export function fittedIconOutputRect(source: IconPixelBounds, outputSize: number
   return { x: (outputSize - width) / 2, y: (outputSize - height) / 2, width, height };
 }
 
+export function anchoredIconOutputRect(anchor: IconPixelBounds, destinationAnchor: IconOutputRect, sourceWidth: number, sourceHeight: number): IconOutputRect {
+  const scale = destinationAnchor.width / Math.max(1, anchor.width);
+  return {
+    x: destinationAnchor.x - anchor.x * scale,
+    y: destinationAnchor.y - anchor.y * scale,
+    width: sourceWidth * scale,
+    height: sourceHeight * scale,
+  };
+}
+
+export function containVisibleIconRect(
+  destination: IconOutputRect,
+  visible: IconPixelBounds,
+  sourceWidth: number,
+  sourceHeight: number,
+  outputSize: number,
+  margin = 0,
+): IconOutputRect {
+  const scaleX = destination.width / Math.max(1, sourceWidth);
+  const scaleY = destination.height / Math.max(1, sourceHeight);
+  let shiftX = 0, shiftY = 0;
+  const left = destination.x + visible.x * scaleX;
+  const right = left + visible.width * scaleX;
+  const top = destination.y + visible.y * scaleY;
+  const bottom = top + visible.height * scaleY;
+  const minimum = Math.max(0, margin), maximum = outputSize - Math.max(0, margin);
+  if (right - left <= maximum - minimum) {
+    if (left < minimum) shiftX = minimum - left;
+    else if (right > maximum) shiftX = maximum - right;
+  }
+  if (bottom - top <= maximum - minimum) {
+    if (top < minimum) shiftY = minimum - top;
+    else if (bottom > maximum) shiftY = maximum - bottom;
+  }
+  return { ...destination, x: destination.x + shiftX, y: destination.y + shiftY };
+}
+
+export function denseForegroundPixelBounds(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  background: [number, number, number],
+  density = 0.08,
+  tolerance = 6,
+): IconPixelBounds | undefined {
+  const columns = new Uint32Array(width);
+  const rows = new Uint32Array(height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const offset = (y * width + x) * 4;
+      const difference = Math.max(Math.abs(data[offset] - background[0]), Math.abs(data[offset + 1] - background[1]), Math.abs(data[offset + 2] - background[2]));
+      if (difference <= tolerance) continue;
+      columns[x]++; rows[y]++;
+    }
+  }
+  let maximumColumn = 0, maximumRow = 0;
+  for (const value of columns) maximumColumn = Math.max(maximumColumn, value);
+  for (const value of rows) maximumRow = Math.max(maximumRow, value);
+  if (!maximumColumn || !maximumRow) return undefined;
+  const minimumColumnPixels = Math.max(2, Math.ceil(maximumColumn * density));
+  const minimumRowPixels = Math.max(2, Math.ceil(maximumRow * density));
+  let minimumX = width, maximumX = -1, minimumY = height, maximumY = -1;
+  for (let x = 0; x < width; x++) if (columns[x] >= minimumColumnPixels) { minimumX = Math.min(minimumX, x); maximumX = x; }
+  for (let y = 0; y < height; y++) if (rows[y] >= minimumRowPixels) { minimumY = Math.min(minimumY, y); maximumY = y; }
+  return maximumX < minimumX || maximumY < minimumY
+    ? undefined
+    : { x: minimumX, y: minimumY, width: maximumX - minimumX + 1, height: maximumY - minimumY + 1 };
+}
+
 function foregroundBoundsFromCanvas(canvas: HTMLCanvasElement, backgroundHex: string): IconPixelBounds | undefined {
   const copy = document.createElement('canvas');
   copy.width = canvas.width; copy.height = canvas.height;
@@ -647,6 +741,18 @@ function foregroundBoundsFromCanvas(canvas: HTMLCanvasElement, backgroundHex: st
   context.drawImage(canvas, 0, 0);
   const background = new THREE.Color(backgroundHex);
   return foregroundPixelBounds(context.getImageData(0, 0, copy.width, copy.height).data, copy.width, copy.height, [
+    Math.round(background.r * 255), Math.round(background.g * 255), Math.round(background.b * 255),
+  ]);
+}
+
+function foregroundDenseBoundsFromCanvas(canvas: HTMLCanvasElement, backgroundHex: string): IconPixelBounds | undefined {
+  const copy = document.createElement('canvas');
+  copy.width = canvas.width; copy.height = canvas.height;
+  const context = copy.getContext('2d', { willReadFrequently: true });
+  if (!context) return undefined;
+  context.drawImage(canvas, 0, 0);
+  const background = new THREE.Color(backgroundHex);
+  return denseForegroundPixelBounds(context.getImageData(0, 0, copy.width, copy.height).data, copy.width, copy.height, [
     Math.round(background.r * 255), Math.round(background.g * 255), Math.round(background.b * 255),
   ]);
 }

@@ -9,6 +9,7 @@ use walkdir::WalkDir;
 struct AppState {
     writable: Mutex<HashSet<PathBuf>>,
     writable_weapons: Mutex<HashSet<PathBuf>>,
+    writable_map_dirs: Mutex<HashSet<PathBuf>>,
     managed_backups: Mutex<HashMap<PathBuf, PathBuf>>,
     schema_cache: Mutex<HashMap<PathBuf, SchemaCacheEntry>>,
 }
@@ -38,6 +39,17 @@ struct BackupEntry {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BackupRestoreResult { backup_path: String, source_path: String }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MapSaveResult { path: String, backup_path: Option<String>, size: usize }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MapWorkspaceEntry { name: String, path: String, svg_files: Vec<String>, has_objects: bool }
+
+#[derive(Serialize)]
+struct MapWorkspace { root: String, entries: Vec<MapWorkspaceEntry> }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -324,9 +336,11 @@ fn list_workspace_dir(path: String) -> Result<Vec<VehicleWorkspaceEntry>, String
 }
 
 #[tauri::command]
-async fn choose_folder(app: AppHandle) -> Result<Option<String>, String> {
+async fn choose_folder(app: AppHandle, initial_path: Option<String>) -> Result<Option<String>, String> {
     let (tx, mut rx) = tauri::async_runtime::channel(1);
-    app.dialog().file().pick_folder(move |picked| { let _ = tx.try_send(picked); });
+    let mut dialog = app.dialog().file();
+    if let Some(path) = initial_path.filter(|value| Path::new(value).is_dir()) { dialog = dialog.set_directory(path); }
+    dialog.pick_folder(move |picked| { let _ = tx.try_send(picked); });
     let picked = rx.recv().await.ok_or_else(|| "文件夹选择窗口意外关闭".to_string())?;
     let Some(picked) = picked else { return Ok(None) };
     let path = local_path(picked)?;
@@ -413,6 +427,85 @@ fn read_binary_base64(path: String) -> Result<String, String> {
     let path = canonical_read_path(Path::new(&path))?;
     let bytes = fs::read(&path).map_err(|e| format!("读取二进制资源失败：{e}"))?;
     Ok(STANDARD.encode(bytes))
+}
+
+fn scan_map_workspace_impl(path: String) -> Result<MapWorkspace, String> {
+    let root = PathBuf::from(path).canonicalize().map_err(|e| format!("无法恢复 maps 文件夹：{e}"))?;
+    if !root.is_dir() { return Err("maps 路径不是文件夹".into()) }
+    let mut entries = Vec::new();
+    for child in fs::read_dir(&root).map_err(|e| format!("无法读取 maps 文件夹：{e}"))?.filter_map(Result::ok).map(|entry| entry.path()) {
+        let metadata = match fs::symlink_metadata(&child) { Ok(value) => value, Err(_) => continue };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() { continue }
+        let mut svg_files = fs::read_dir(&child).map_err(|e| format!("无法读取地图目录 {}：{e}", display(&child)))?
+            .filter_map(Result::ok).map(|entry| entry.path())
+            .filter(|path| path.is_file() && path.extension().and_then(|value| value.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("svg")))
+            .map(|path| file_name(&path)).collect::<Vec<_>>();
+        if svg_files.is_empty() { continue }
+        svg_files.sort_by_key(|name| name.to_ascii_lowercase());
+        let has_objects = svg_files.iter().any(|name| name.eq_ignore_ascii_case("objects.svg"));
+        entries.push(MapWorkspaceEntry { name: file_name(&child), path: display(&child), svg_files, has_objects });
+    }
+    entries.sort_by(|left, right| left.name.to_ascii_lowercase().cmp(&right.name.to_ascii_lowercase()));
+    Ok(MapWorkspace { root: display(&root), entries })
+}
+
+#[tauri::command]
+fn scan_map_workspace(path: String) -> Result<MapWorkspace, String> { scan_map_workspace_impl(path) }
+
+#[tauri::command]
+async fn choose_map_output_folder(app: AppHandle, state: State<'_, AppState>, initial_path: Option<String>) -> Result<Option<String>, String> {
+    let (tx, mut rx) = tauri::async_runtime::channel(1);
+    let mut dialog = app.dialog().file();
+    if let Some(path) = initial_path.filter(|value| Path::new(value).is_dir()) { dialog = dialog.set_directory(path); }
+    dialog.pick_folder(move |picked| { let _ = tx.try_send(picked); });
+    let picked = rx.recv().await.ok_or_else(|| "文件夹选择窗口意外关闭".to_string())?;
+    let Some(picked) = picked else { return Ok(None) };
+    let path = canonical_read_directory(&local_path(picked)?)?;
+    state.writable_map_dirs.lock().map_err(|_| "地图写入权限状态不可用")?.insert(path.clone());
+    Ok(Some(display(&path)))
+}
+
+#[tauri::command]
+fn authorize_map_output_root(path: String, state: State<'_, AppState>) -> Result<String, String> {
+    let path = canonical_read_directory(Path::new(&path))?;
+    state.writable_map_dirs.lock().map_err(|_| "地图写入权限状态不可用")?.insert(path.clone());
+    Ok(display(&path))
+}
+
+fn map_directory_name(value: &str) -> Result<&str, String> {
+    let name = value.trim();
+    if name.is_empty() || name == "." || name == ".." || name.chars().any(|character| character.is_control() || matches!(character, '/' | '\\' | ':')) {
+        return Err("地图文件夹名称无效".into())
+    }
+    Ok(name)
+}
+
+fn save_map_override_impl(root: &Path, map_name: &str, text: &str) -> Result<MapSaveResult, String> {
+    if text.len() > 64 * 1024 * 1024 { return Err("objects.svg 超过 64 MiB，已拒绝保存".into()) }
+    let trimmed = text.trim_start_matches('\u{feff}').trim_start();
+    if !trimmed.starts_with("<?xml") && !trimmed.starts_with("<svg") {
+        return Err("保存内容不是有效的 SVG/XML 文档".into())
+    }
+    if !text.contains("<svg") || !text.contains("</svg>") { return Err("保存内容缺少完整的 svg 根节点".into()) }
+    let root = canonical_read_directory(root)?;
+    let folder = root.join(map_directory_name(&map_name)?);
+    if folder.exists() && !folder.is_dir() { return Err("目标地图路径已存在，但不是文件夹".into()) }
+    fs::create_dir_all(&folder).map_err(|e| format!("无法创建目标地图文件夹：{e}"))?;
+    let folder = folder.canonicalize().map_err(|e| format!("无法确认目标地图文件夹：{e}"))?;
+    if !folder.starts_with(&root) { return Err("目标地图文件夹超出所选 maps 根目录".into()) }
+    let target = folder.join("objects.svg");
+    if target.exists() && !target.is_file() { return Err("输出目录中的 objects.svg 不是普通文件".into()) }
+    atomic_write(&target, text.as_bytes())?;
+    Ok(MapSaveResult { path: display(&target), backup_path: None, size: text.len() })
+}
+
+#[tauri::command]
+fn save_map_override(output_root: String, map_name: String, text: String, state: State<'_, AppState>) -> Result<MapSaveResult, String> {
+    let root = canonical_read_directory(Path::new(&output_root))?;
+    if !state.writable_map_dirs.lock().map_err(|_| "地图写入权限状态不可用")?.contains(&root) {
+        return Err("拒绝保存：请先选择或恢复模组 maps 根目录".into())
+    }
+    save_map_override_impl(&root, &map_name, &text)
 }
 
 #[tauri::command]
@@ -768,6 +861,42 @@ mod tests {
     }
 
     #[test]
+    fn map_workspace_lists_only_direct_svg_map_directories() {
+        let unique = format!("rwrstudio-maps-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let root = std::env::temp_dir().join(&unique);
+        fs::create_dir_all(root.join("edelweiss1")).unwrap();
+        fs::create_dir_all(root.join("edelweiss2")).unwrap();
+        fs::create_dir_all(root.join("notes")).unwrap();
+        fs::write(root.join("edelweiss1/objects.svg"), "<svg></svg>").unwrap();
+        fs::write(root.join("edelweiss1/terrain.svg"), "<svg></svg>").unwrap();
+        fs::write(root.join("edelweiss2/terrain.svg"), "<svg></svg>").unwrap();
+        fs::write(root.join("notes/readme.txt"), "ignored").unwrap();
+        let workspace = scan_map_workspace_impl(display(&root)).expect("应能扫描 maps 根目录");
+        assert_eq!(workspace.entries.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(), vec!["edelweiss1", "edelweiss2"]);
+        assert!(workspace.entries[0].has_objects);
+        assert!(!workspace.entries[1].has_objects);
+        assert_eq!(workspace.entries[0].svg_files, vec!["objects.svg", "terrain.svg"]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn map_save_creates_map_directory_without_backups() {
+        let unique = format!("rwrstudio-map-save-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let root = std::env::temp_dir().join(&unique);
+        fs::create_dir_all(&root).unwrap();
+        let first = "<?xml version=\"1.0\"?><svg><g id=\"first\"/></svg>";
+        let second = "<?xml version=\"1.0\"?><svg><g id=\"second\"/></svg>";
+        let saved = save_map_override_impl(&root, "edelweiss1", first).expect("应自动创建地图子目录");
+        assert!(saved.path.ends_with("edelweiss1\\objects.svg") || saved.path.ends_with("edelweiss1/objects.svg"));
+        save_map_override_impl(&root, "edelweiss1", second).expect("应能覆盖保存");
+        let target = root.join("edelweiss1/objects.svg");
+        assert_eq!(fs::read_to_string(&target).unwrap(), second);
+        assert!(!PathBuf::from(format!("{}.bak", display(&target))).exists());
+        assert!(!PathBuf::from(format!("{}.bak1", display(&target))).exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn weapon_save_rejects_unregistered_session() {
         let unique = format!("rwrstudio-weapon-auth-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
         let path = std::env::temp_dir().join(format!("{unique}.weapon"));
@@ -828,7 +957,7 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![open_vehicle, open_vehicle_path, resolve_vehicle_base, choose_vehicle_base, choose_vehicle_workspace, scan_vehicle_workspace, scan_vehicle_schema, list_workspace_dir,
-            choose_folder, choose_override_file, choose_support_file,
+            choose_folder, scan_map_workspace, choose_map_output_folder, authorize_map_output_root, save_map_override, choose_override_file, choose_support_file,
             scan_resource_folder, read_text_path, read_builtin_support, read_binary_base64, directory_exists, save_render_png, save_vehicle, register_vehicle_session, register_weapon_session, save_weapon,
             list_backups, read_backup, restore_backup, delete_backups])
         .run(tauri::generate_context!())

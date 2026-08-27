@@ -8,6 +8,9 @@ export interface VehicleSchema { objectTypes: string[]; attributes: Record<strin
 export interface ResourceFolderScan { index: Record<string, string>; duplicates: string[]; warnings: string[] }
 export interface BackupEntry { backupPath: string; sourcePath: string; sourceName: string; backupName: string; modifiedMs: number; size: number; sourceExists: boolean }
 export interface BackupRestoreResult { backupPath: string; sourcePath: string }
+export interface MapSaveResult { path: string; backupPath?: string; size: number }
+export interface MapWorkspaceEntry { name: string; path: string; svgFiles: string[]; hasObjects: boolean }
+export interface MapWorkspace { root: string; entries: MapWorkspaceEntry[] }
 export type ResourceKind = 'model' | 'texture' | 'weapon';
 
 function decodeBase64(base64: string): ArrayBuffer {
@@ -26,7 +29,10 @@ export const desktop = {
   scanVehicleWorkspace: (path: string) => invoke<VehicleWorkspace>('scan_vehicle_workspace', { path }),
   listWorkspaceDir: (path: string) => invoke<VehicleWorkspaceEntry[]>('list_workspace_dir', { path }),
   scanVehicleSchema: (path: string, force = false) => invoke<VehicleSchema>('scan_vehicle_schema', { path, force }),
-  chooseFolder: () => invoke<string | null>('choose_folder'),
+  chooseFolder: (initialPath?: string) => invoke<string | null>('choose_folder', { initialPath }),
+  scanMapWorkspace: (path: string) => invoke<MapWorkspace>('scan_map_workspace', { path }),
+  chooseMapOutputFolder: (initialPath?: string) => invoke<string | null>('choose_map_output_folder', { initialPath }),
+  authorizeMapOutputRoot: (path: string) => invoke<string>('authorize_map_output_root', { path }),
   chooseOverrideFile: () => invoke<string | null>('choose_override_file'),
   chooseSupportFile: (kind: 'model' | 'animation') => invoke<string | null>('choose_support_file', { kind }),
   readBuiltinSupport: (kind: 'model' | 'animation') => invoke<string>('read_builtin_support', { kind }),
@@ -35,6 +41,7 @@ export const desktop = {
   readText: (path: string) => invoke<string>('read_text_path', { path }),
   readBinary: async (path: string): Promise<ArrayBuffer> => decodeBase64(await invoke<string>('read_binary_base64', { path })),
   saveRenderPng: (suggestedName: string, base64: string) => invoke<string | null>('save_render_png', { suggestedName, base64 }),
+  saveMapOverride: (outputRoot: string, mapName: string, text: string) => invoke<MapSaveResult>('save_map_override', { outputRoot, mapName, text }),
   saveVehicle: (path: string, text: string, saveAs = false) =>
     invoke<SavedFile | null>('save_vehicle', { path, text, saveAs }),
   registerVehicleSession: (path: string) => invoke<void>('register_vehicle_session', { path }),

@@ -1,6 +1,7 @@
 import type { Vec3 } from '../math';
 
 export interface IconRenderSettings {
+  framingMode: 'body' | 'full';
   cameraAzimuth: number;
   cameraElevation: number;
   cameraFov: number;
@@ -30,6 +31,7 @@ export interface IconRenderPreferences {
 export type IconPartOffsets = Record<string, Vec3>;
 
 export const DEFAULT_ICON_RENDER_SETTINGS: IconRenderSettings = {
+  framingMode: 'body',
   cameraAzimuth: -40,
   cameraElevation: 55,
   cameraFov: 90,
@@ -39,7 +41,7 @@ export const DEFAULT_ICON_RENDER_SETTINGS: IconRenderSettings = {
   lightElevation: 60,
   ambient: 0.04,
   threshold: 0.52,
-  padding: 0.1,
+  padding: 0.04,
   outputSize: 512,
   background: '#181818',
 };
@@ -73,6 +75,7 @@ export function saveIconRenderPreferences(value: IconRenderPreferences): void {
 export function normalizeIconRenderSettings(value?: Partial<IconRenderSettings>): IconRenderSettings {
   const source = value ?? {};
   return {
+    framingMode: source.framingMode === 'full' ? 'full' : DEFAULT_ICON_RENDER_SETTINGS.framingMode,
     cameraAzimuth: bounded(source.cameraAzimuth, -180, 180, DEFAULT_ICON_RENDER_SETTINGS.cameraAzimuth),
     cameraElevation: bounded(source.cameraElevation, 5, 89, DEFAULT_ICON_RENDER_SETTINGS.cameraElevation),
     cameraFov: bounded(source.cameraFov, 15, 150, DEFAULT_ICON_RENDER_SETTINGS.cameraFov),

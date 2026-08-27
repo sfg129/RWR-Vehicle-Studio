@@ -235,7 +235,9 @@ function message(error: unknown): string {
       </section>
 
       <section class="icon-settings-group">
-        <header><b>相机与姿态</b><small>正常透视 · 自动包围完整炮管</small></header>
+        <header><b>相机与姿态</b><small>正常透视 · 车体主体定标</small></header>
+        <label><span>构图基准</span><select v-model="settings.framingMode"><option value="body">主体（忽略炮管/天线定标）</option><option value="full">完整轮廓</option></select></label>
+        <small class="perspective-hint">“主体”仅在计算尺寸和中心时忽略武器与细长物，导出仍保留完整模型；拖式火炮等可改用“完整轮廓”。</small>
         <label class="icon-slider-row"><span>方位角</span><input v-model.number="settings.cameraAzimuth" type="range" min="-180" max="180" step="1" /><input v-model.number="settings.cameraAzimuth" type="number" min="-180" max="180" step="1" /></label>
         <label class="icon-slider-row"><span>俯视角</span><input v-model.number="settings.cameraElevation" type="range" min="5" max="89" step="1" /><input v-model.number="settings.cameraElevation" type="number" min="5" max="89" step="1" /></label>
         <label class="icon-slider-row perspective-strength-row"><span>fov</span><input v-model.number="settings.cameraFov" type="range" min="15" max="150" step="1" list="perspective-fov-marks" /><input v-model.number="settings.cameraFov" type="number" min="15" max="150" step="1" /></label>
