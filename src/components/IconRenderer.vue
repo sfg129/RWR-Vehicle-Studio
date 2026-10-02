@@ -197,7 +197,6 @@ function message(error: unknown): string {
   <section class="icon-render-workspace">
     <aside class="icon-parts-panel">
       <div class="panel-title"><small>RENDER PARTS</small><h2>渲染部件</h2></div>
-      <p class="muted">仅装配正常外观与武器；不创建乘员、碰撞框、护盾框或场景网格。</p>
       <div v-if="!document" class="empty-state">先从顶部打开一个 `.vehicle` 文件。</div>
       <div v-else class="icon-part-list">
         <button v-for="part in parts" :key="part.key" class="list-item icon-part-item" :class="{ active: selectedKey === part.key }" @click="selectedKey = part.key">
@@ -206,8 +205,7 @@ function message(error: unknown): string {
         </button>
       </div>
       <section v-if="selectedPart" class="icon-offset-editor">
-        <header><small>TEMPORARY OFFSET</small><b>{{ selectedPart.label }}</b></header>
-        <p>只影响本次渲染会话，不修改或保存到源 `.vehicle/.weapon`。</p>
+        <header><small>临时偏移</small><b>{{ selectedPart.label }}</b></header>
         <label v-for="(axis, index) in ['X', 'Y', 'Z']" :key="axis" class="icon-offset-row">
           <span>{{ axis }}</span>
           <button class="tiny" @click="nudgeOffset(index, -0.05)">−</button>
@@ -221,7 +219,7 @@ function message(error: unknown): string {
     <section class="icon-preview-panel">
       <div ref="host" class="icon-preview-host"></div>
       <div class="icon-preview-badge"><b>实时二值渲染</b><span>#000 / #FFF · 背景 {{ settings.background }}</span></div>
-      <div v-if="!document" class="viewport-empty"><b>NO VEHICLE LOADED</b><span>打开载具后自动组合模型与武器。</span></div>
+      <div v-if="!document" class="viewport-empty"><b>NO VEHICLE LOADED</b></div>
       <div v-if="diagnostics.length" class="icon-diagnostics"><b>资源诊断 {{ diagnostics.length }}</b><span v-for="item in diagnostics.slice(0, 5)" :key="item" class="ellipsis" :title="item">{{ item }}</span></div>
     </section>
 
@@ -235,21 +233,19 @@ function message(error: unknown): string {
       </section>
 
       <section class="icon-settings-group">
-        <header><b>相机与姿态</b><small>正常透视 · 车体主体定标</small></header>
-        <label><span>构图基准</span><select v-model="settings.framingMode"><option value="body">主体（忽略炮管/天线定标）</option><option value="full">完整轮廓</option></select></label>
-        <small class="perspective-hint">“主体”仅在计算尺寸和中心时忽略武器与细长物，导出仍保留完整模型；拖式火炮等可改用“完整轮廓”。</small>
+        <header><b>相机与姿态</b></header>
+        <label><span>构图基准</span><select v-model="settings.framingMode"><option value="body">主体（忽略炮管/天线定标）</option><option value="barrel">主体＋炮管（忽略天线）</option><option value="full">完整轮廓</option></select></label>
         <label class="icon-slider-row"><span>方位角</span><input v-model.number="settings.cameraAzimuth" type="range" min="-180" max="180" step="1" /><input v-model.number="settings.cameraAzimuth" type="number" min="-180" max="180" step="1" /></label>
         <label class="icon-slider-row"><span>俯视角</span><input v-model.number="settings.cameraElevation" type="range" min="5" max="89" step="1" /><input v-model.number="settings.cameraElevation" type="number" min="5" max="89" step="1" /></label>
         <label class="icon-slider-row perspective-strength-row"><span>fov</span><input v-model.number="settings.cameraFov" type="range" min="15" max="150" step="1" list="perspective-fov-marks" /><input v-model.number="settings.cameraFov" type="number" min="15" max="150" step="1" /></label>
         <datalist id="perspective-fov-marks"><option value="15" label="平缓" /><option value="60" /><option value="90" label="广角" /><option value="120" /><option value="150" label="极端" /></datalist>
-        <small class="perspective-hint">垂直 FOV：15° 接近平行投影；90°–120° 为夸张广角；150° 为极端近大远小。</small>
         <label class="icon-slider-row"><span>车体偏航</span><input v-model.number="settings.vehicleYaw" type="range" min="-180" max="180" step="1" /><input v-model.number="settings.vehicleYaw" type="number" min="-180" max="180" step="1" /></label>
         <label class="icon-slider-row"><span>主炮塔偏航</span><input v-model.number="settings.turretYaw" type="range" min="-180" max="180" step="1" /><input v-model.number="settings.turretYaw" type="number" min="-180" max="180" step="1" /></label>
         <label class="icon-slider-row"><span>留白</span><input v-model.number="settings.padding" type="range" min="0" max="0.5" step="0.01" /><input v-model.number="settings.padding" type="number" min="0" max="0.5" step="0.01" /></label>
       </section>
 
       <section class="icon-settings-group">
-        <header><b>光照与阈值</b><small>白色漫反射 → 亮度二值化</small></header>
+        <header><b>光照与阈值</b></header>
         <label class="icon-slider-row"><span>光源方位</span><input v-model.number="settings.lightAzimuth" type="range" min="-180" max="180" step="1" /><input v-model.number="settings.lightAzimuth" type="number" min="-180" max="180" step="1" /></label>
         <label class="icon-slider-row"><span>光源高度</span><input v-model.number="settings.lightElevation" type="range" min="0" max="90" step="1" /><input v-model.number="settings.lightElevation" type="number" min="0" max="90" step="1" /></label>
         <label class="icon-slider-row"><span>环境光</span><input v-model.number="settings.ambient" type="range" min="0" max="1" step="0.01" /><input v-model.number="settings.ambient" type="number" min="0" max="1" step="0.01" /></label>
@@ -257,7 +253,7 @@ function message(error: unknown): string {
       </section>
 
       <section class="icon-settings-group icon-output-group">
-        <header><b>输出</b><small>PNG · 超采样抗锯齿</small></header>
+        <header><b>输出</b><small>PNG</small></header>
         <label><span>尺寸</span><select v-model.number="settings.outputSize"><option v-for="size in [64, 80, 96, 128, 256, 512]" :key="size" :value="size">{{ size }} × {{ size }}</option></select></label>
         <label><span>背景色</span><input v-model="settings.background" type="color" /><input v-model="settings.background" class="color-text" pattern="#[0-9A-Fa-f]{6}" /></label>
         <button class="primary icon-export" :disabled="!document || exporting" @click="exportPng">{{ exporting ? '正在导出…' : '导出 PNG' }}</button>

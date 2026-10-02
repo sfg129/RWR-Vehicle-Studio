@@ -7,6 +7,7 @@ import { vec3, type Vec3 } from '../core/math';
 import { parseStaticVoxelModel, type StaticVoxel } from '../core/voxel/voxel-model';
 import { SOLDIER_GAME_SCALE } from '../core/soldier/soldier-assets';
 import { rotateY, tireVisualPosition, turretWorldPose, visualMatchesDamageState, WEAPON_LOGICAL_TO_MODEL_YAW } from '../core/vehicle/vehicle-model';
+import { offsetWeaponModelPreview } from './weapon-model-preview';
 import { normalizeIconRenderSettings, type IconPartOffsets, type IconRenderSettings } from '../core/icon-render/icon-render-presets';
 
 export interface IconRenderPart {
@@ -175,7 +176,7 @@ export class IconRenderController {
           if (path) {
             const mesh = await this.loadMesh(path);
             if (generation !== this.sceneGeneration) return;
-            group.add(this.buildMesh(path, mesh));
+            group.add(offsetWeaponModelPreview(this.buildMesh(path, mesh)));
           }
           else this.onDiagnostic(`图标渲染缺少武器模型：${weapon.mesh}`);
         }
@@ -184,7 +185,7 @@ export class IconRenderController {
           if (path) {
             const voxels = await this.loadVoxels(path);
             if (generation !== this.sceneGeneration) return;
-            const voxel = this.buildVoxelModel(voxels); voxel.rotation.y = WEAPON_LOGICAL_TO_MODEL_YAW; group.add(voxel);
+            const voxel = this.buildVoxelModel(voxels); voxel.rotation.y = WEAPON_LOGICAL_TO_MODEL_YAW; group.add(offsetWeaponModelPreview(voxel));
           }
           else this.onDiagnostic(`图标渲染缺少武器体素模型：${weapon.voxelModel}`);
         }
@@ -252,22 +253,30 @@ export class IconRenderController {
       const fullBounds = foregroundBoundsFromCanvas(this.renderer.domElement, measurementBackground);
       if (!fullBounds) throw new Error('导出画面中没有检测到载具像素');
 
-      // Long barrels and antennas must not decide the apparent vehicle size. In
-      // body framing mode, hide weapon models for a second measurement pass and
-      // reject sparse rows/columns left by thin details embedded in visual meshes.
-      // The final render below still contains every part; only its scale/anchor
-      // comes from the compact vehicle body.
-      let anchorBounds = fullBounds;
-      if (this.settings.framingMode === 'body') {
+      // Measure the dense visual body without weapons to exclude thin details
+      // such as antennas. The barrel mode then measures weapon models alone and
+      // adds their bounds back, so a long cannon determines the exported scale.
+      let denseBodyBounds: IconPixelBounds | undefined;
+      let weaponBounds: IconPixelBounds | undefined;
+      if (this.settings.framingMode !== 'full') {
+        const visuals = this.bindings.filter((binding) => binding.kind === 'visual').map((binding) => binding.object);
         const weapons = this.bindings.filter((binding) => binding.kind === 'weapon').map((binding) => binding.object);
-        for (const weapon of weapons) weapon.visible = false;
+        const visibility = [...visuals, ...weapons].map((object) => object.visible);
         try {
+          for (const weapon of weapons) weapon.visible = false;
           this.renderNow(this.exportCamera, measurementBackground);
-          anchorBounds = foregroundDenseBoundsFromCanvas(this.renderer.domElement, measurementBackground) ?? fullBounds;
+          denseBodyBounds = foregroundDenseBoundsFromCanvas(this.renderer.domElement, measurementBackground);
+          if (this.settings.framingMode === 'barrel' && weapons.length) {
+            for (const visual of visuals) visual.visible = false;
+            for (const weapon of weapons) weapon.visible = true;
+            this.renderNow(this.exportCamera, measurementBackground);
+            weaponBounds = foregroundBoundsFromCanvas(this.renderer.domElement, measurementBackground);
+          }
         } finally {
-          for (const weapon of weapons) weapon.visible = true;
+          [...visuals, ...weapons].forEach((object, index) => { object.visible = visibility[index]; });
         }
       }
+      const anchorBounds = iconFramingAnchorBounds(this.settings.framingMode, fullBounds, denseBodyBounds, weaponBounds);
 
       // The preview deliberately uses a solid background, but exported map icons
       // must preserve only the model coverage. Black model pixels remain opaque;
@@ -280,11 +289,12 @@ export class IconRenderController {
       context.clearRect(0, 0, size, size);
       context.imageSmoothingEnabled = true;
       context.imageSmoothingQuality = 'high';
-      if (this.settings.framingMode === 'body') {
+      if (this.settings.framingMode !== 'full') {
         const anchor = expandedPixelBounds(anchorBounds, renderSize, renderSize, 2);
         const destinationAnchor = fittedIconOutputRect(anchor, size, this.settings.padding);
         const anchoredDestination = anchoredIconOutputRect(anchor, destinationAnchor, renderSize, renderSize);
-        const destination = containVisibleIconRect(anchoredDestination, fullBounds, renderSize, renderSize, size, 1);
+        const visibleBounds = this.settings.framingMode === 'barrel' ? anchorBounds : fullBounds;
+        const destination = containVisibleIconRect(anchoredDestination, visibleBounds, renderSize, renderSize, size, 1);
         context.drawImage(this.renderer.domElement, 0, 0, renderSize, renderSize, destination.x, destination.y, destination.width, destination.height);
       } else {
         const source = expandedPixelBounds(fullBounds, renderSize, renderSize, 2);
@@ -654,6 +664,22 @@ export function foregroundPixelBounds(data: Uint8ClampedArray, width: number, he
     }
   }
   return maximumX < minimumX || maximumY < minimumY ? undefined : { x: minimumX, y: minimumY, width: maximumX - minimumX + 1, height: maximumY - minimumY + 1 };
+}
+
+export function iconFramingAnchorBounds(
+  mode: IconRenderSettings['framingMode'],
+  full: IconPixelBounds,
+  denseBody?: IconPixelBounds,
+  weapon?: IconPixelBounds,
+): IconPixelBounds {
+  if (mode === 'full') return full;
+  if (mode === 'body') return denseBody ?? full;
+  if (!denseBody) return full;
+  if (!weapon) return denseBody;
+  const right = Math.max(denseBody.x + denseBody.width, weapon.x + weapon.width);
+  const bottom = Math.max(denseBody.y + denseBody.height, weapon.y + weapon.height);
+  const x = Math.min(denseBody.x, weapon.x), y = Math.min(denseBody.y, weapon.y);
+  return { x, y, width: right - x, height: bottom - y };
 }
 
 export function fittedIconOutputRect(source: IconPixelBounds, outputSize: number, padding: number): IconOutputRect {

@@ -8,6 +8,7 @@ import { TGALoader } from 'three/examples/jsm/loaders/TGALoader.js';
 import type { SourceDocument, SourceNode } from '../core/xml/source-document';
 import type { ResourceCatalog } from '../core/resources/resource-catalog';
 import { characterEntranceEdit, characterSlotHidden, characterSlotPose, characterStatePlacement, dragNeedsRebuild, editableBasisRotation, editablePosition, idleState, localDragValue, rotateY, SHIELD_LOGICAL_TO_MODEL_YAW, tireVisualPosition, turretWorldPose, visualMatchesDamageState, WEAPON_LOGICAL_TO_MODEL_YAW } from '../core/vehicle/vehicle-model';
+import { offsetWeaponModelPreview } from './weapon-model-preview';
 import { vec3, type Vec3 } from '../core/math';
 import { SoldierAssets, SOLDIER_GAME_SCALE, rwrLinearToDisplay, type SoldierAnimation } from '../core/soldier/soldier-assets';
 import { parseStaticVoxelModel, type StaticVoxel } from '../core/voxel/voxel-model';
@@ -331,11 +332,11 @@ export class SceneController {
       group.position.set(global[0] + pose.position[0] + rotatedWeaponOffset[0], global[1] + pose.position[1] + rotatedWeaponOffset[1], global[2] + pose.position[2] + rotatedWeaponOffset[2]); group.rotation.y = pose.rotation;
       if (weapon.mesh) {
         const path = this.catalog.resolve(weapon.mesh, 'model');
-        if (path) { const mesh = await this.loadMesh(path); if (generation !== this.sceneGeneration) return; const object = await this.buildMeshWithTextures(path, mesh, weapon.texture ? [weapon.texture] : [], generation); if (generation !== this.sceneGeneration) return; group.add(object); }
+        if (path) { const mesh = await this.loadMesh(path); if (generation !== this.sceneGeneration) return; const object = await this.buildMeshWithTextures(path, mesh, weapon.texture ? [weapon.texture] : [], generation); if (generation !== this.sceneGeneration) return; group.add(offsetWeaponModelPreview(object)); }
       }
       if (weapon.voxelModel) {
         const path = this.catalog.resolve(weapon.voxelModel, 'model');
-        if (path) { const voxels = await this.loadVoxels(path); if (generation !== this.sceneGeneration) return; const object = this.buildVoxelModel(voxels); object.rotation.y = WEAPON_LOGICAL_TO_MODEL_YAW; group.add(object); }
+        if (path) { const voxels = await this.loadVoxels(path); if (generation !== this.sceneGeneration) return; const object = this.buildVoxelModel(voxels); object.rotation.y = WEAPON_LOGICAL_TO_MODEL_YAW; group.add(offsetWeaponModelPreview(object)); }
       }
       if (this.options?.showShields) {
         const shieldFrame = new THREE.Group(); shieldFrame.rotation.y = SHIELD_LOGICAL_TO_MODEL_YAW;

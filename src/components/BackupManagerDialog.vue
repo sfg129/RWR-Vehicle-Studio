@@ -44,7 +44,6 @@ function message(value: unknown) { return value instanceof Error ? value.message
 <template>
   <div class="modal-backdrop"><section class="dialog backup-dialog">
     <header><div><small>BACKUP MANAGER</small><h2>管理备份</h2></div><button class="icon" @click="$emit('close')">×</button></header>
-    <p class="muted">每个载具或武器只轮换保留 <b>.bak</b> 与 <b>.bak1</b>。列表也会显示旧版本曾创建的更多代备份，便于统一清理。</p>
     <p v-if="error" class="backup-error">{{ error }}</p>
     <div class="backup-layout">
       <section class="backup-list">

@@ -30,6 +30,7 @@ import {
 } from './core/resources/resource-presets';
 import { flattenWorkspace, loadWorkspacePreferences, saveWorkspacePreferences } from './core/workspace/vehicle-workspace';
 import { createDirtyComputed, createEditorRevisions } from './core/editor/revision-state';
+import { insertVehicleTab, vehiclePathKey, vehicleTabDirty, type VehicleTab } from './core/editor/vehicle-tabs';
 import type { CrewGuideKind } from './editor/scene-controller';
 
 const preferences = loadResourcePreferences();
@@ -61,23 +62,36 @@ const lastEditedDoc = ref<'vehicle' | string>('vehicle');
 const saving = ref(false);
 const activeMode = ref<'editor' | 'render' | 'map'>('editor');
 const mapDirty = ref(false);
+interface VehicleTabState {
+  opened: OpenedFile; document: SourceDocument; savedText: string; undoStack: string[];
+  baseReference: string; baseOpened?: OpenedFile; baseDocument?: SourceDocument; baseAutomatic: boolean; baseError: string;
+  selectedId?: number; selectedEntrance?: CrewGuideKind; selectedTurretPivot: boolean; turretPreviewDegrees: number;
+  collapsedGroups: string[]; expandedCrewSlots: number[]; expandedTurrets: number[]; lastEditedDoc: string;
+  status: string; missing: string[]; diagnostics: string[];
+}
+const vehicleTabs = shallowRef<VehicleTab<VehicleTabState>[]>([]);
+const activeVehicleTabId = ref('');
+const closingVehicleTabId = ref('');
+const closingVehicleTab = computed(() => vehicleTabs.value.find((tab) => tab.id === closingVehicleTabId.value));
+const vehicleTabsBar = ref<HTMLElement>();
+let restoringVehicleTab = false;
 
 // 灾难关闭快速备份：脏状态确认退出时写入 localStorage，下次启动提示恢复。
 const RECOVERY_KEY = 'rwr-vehicle-studio.recovery.v1';
 interface RecoverySnapshot {
   timestamp: number;
   vehicle?: { name: string; path: string; workingText: string; savedText: string };
+  vehicles?: { name: string; path: string; workingText: string; savedText: string }[];
   weapons: { key: string; path: string; name: string; workingText: string; savedText: string }[];
 }
 function captureRecoverySnapshot(): void {
-  const vehicle = document.value && opened.value && document.value.serialize() !== savedText.value
-    ? { name: opened.value.name, path: opened.value.path, workingText: document.value.serialize(), savedText: savedText.value }
-    : undefined;
+  rememberActiveVehicleTab();
+  const vehicles = vehicleTabs.value.filter(vehicleTabDirty).map(({ state }) => ({ name: state.opened.name, path: state.opened.path, workingText: state.document.serialize(), savedText: state.savedText }));
   const weapons = [...weaponSessions.values()]
     .filter((session) => session.document.serialize() !== session.savedText)
     .map((session) => ({ key: session.key, path: session.path, name: session.name, workingText: session.document.serialize(), savedText: session.savedText }));
-  if (!vehicle && !weapons.length) { localStorage.removeItem(RECOVERY_KEY); return; }
-  const recovery: RecoverySnapshot = { timestamp: Date.now(), vehicle, weapons };
+  if (!vehicles.length && !weapons.length) { localStorage.removeItem(RECOVERY_KEY); return; }
+  const recovery: RecoverySnapshot = { timestamp: Date.now(), vehicles, weapons };
   try { localStorage.setItem(RECOVERY_KEY, JSON.stringify(recovery)); }
   catch { /* localStorage 容量不足时放弃快速备份，不阻断退出 */ }
 }
@@ -85,37 +99,28 @@ function readRecoverySnapshot(): RecoverySnapshot | null {
   try {
     const raw = localStorage.getItem(RECOVERY_KEY); if (!raw) return null;
     const parsed = JSON.parse(raw) as RecoverySnapshot;
-    if (!parsed.vehicle && !parsed.weapons?.length) return null;
+    if (!parsed.vehicle && !parsed.vehicles?.length && !parsed.weapons?.length) return null;
     return parsed;
   } catch { localStorage.removeItem(RECOVERY_KEY); return null; }
 }
 async function applyRecoverySnapshot(recovery: RecoverySnapshot): Promise<void> {
   const registrationFailures: string[] = [];
-  if (recovery.vehicle) {
-    opened.value = { name: recovery.vehicle.name, path: recovery.vehicle.path, text: recovery.vehicle.workingText };
-    document.value = new SourceDocument(recovery.vehicle.workingText);
-    savedText.value = recovery.vehicle.savedText;
-    undoStack.value = []; missing.value = []; collapsedGroups.clear(); expandedCrewSlots.clear(); expandedTurrets.clear(); selectedTurretPivot.value = false; turretPreviewDegrees.value = 0;
-    markDocumentChanged();
-    try { await desktop.registerVehicleSession(recovery.vehicle.path); } catch (error) { registrationFailures.push(`载具：${recovery.vehicle.path}（${message(error)}）`); }
-    await resolveAutomaticBase();
-    rebuildPreview(false);
-    if (hasRememberedResources.value) {
-      status.value = `已恢复 ${opened.value.name} 的未保存修改；正在载入资源…`;
-      await indexRememberedResources(rememberedSelection, vehicleLoadToken);
-    } else {
-      status.value = `已恢复 ${opened.value.name} 的未保存修改；请配置资源文件夹`;
-      await loadSoldier();
-      resourceDialog.value = true;
-    }
+  const recoveredTabs: VehicleTab<VehicleTabState>[] = [];
+  for (const item of recovery.vehicles ?? (recovery.vehicle ? [recovery.vehicle] : [])) {
+    const state = newVehicleTabState({ name: item.name, path: item.path, text: item.workingText });
+    state.savedText = item.savedText; state.document.restoreSaved(item.savedText);
+    recoveredTabs.push({ id: crypto.randomUUID(), preview: false, state });
+    try { await desktop.registerVehicleSession(item.path); } catch (error) { registrationFailures.push(`载具：${item.path}（${message(error)}）`); }
   }
-  for (const item of recovery.weapons) {
+  vehicleTabs.value = [...vehicleTabs.value, ...recoveredTabs];
+  for (const item of recovery.weapons ?? []) {
     if (weaponSessions.has(item.path)) continue;
     const session: WeaponSession = { key: item.key, path: item.path, name: item.name, document: new SourceDocument(item.workingText), savedText: item.savedText, undoStack: [] };
     weaponSessions.set(item.path, session);
     try { await desktop.registerWeaponSession(item.path); } catch (error) { registrationFailures.push(`武器：${item.path}（${message(error)}）`); }
   }
   updateWeaponDirtyCount();
+  if (recoveredTabs.length) await activateVehicleTab(recoveredTabs.at(-1)!.id);
   markDocumentChanged();
   if (registrationFailures.length) {
     status.value = `已恢复未保存内容，但以下原文件已不存在或不可访问：\n${registrationFailures.join('\n')}`;
@@ -160,7 +165,8 @@ const rootFields = computed(() => {
 });
 const dirty = createDirtyComputed(documentRevision, document, savedText);
 const weaponDirty = computed(() => { void weaponRevision.value; return !!weaponSession.value && weaponSession.value.document.serialize() !== weaponSession.value.savedText; });
-const anyDirty = computed(() => dirty.value || weaponDirtyCount.value > 0 || mapDirty.value);
+const dirtyVehicleTabs = computed(() => { void documentRevision.value; return vehicleTabs.value.filter((tab) => tab.id === activeVehicleTabId.value ? dirty.value : vehicleTabDirty(tab)); });
+const anyDirty = computed(() => dirtyVehicleTabs.value.length > 0 || weaponDirtyCount.value > 0 || mapDirty.value);
 const dirtyWeaponSessions = computed(() => { void weaponRevision.value; return [...weaponSessions.values()].filter((session) => session.document.serialize() !== session.savedText); });
 const weaponShields = computed(() => { void weaponRevision.value; const session = weaponSession.value; if (!session) return []; return session.document.descendants('shield').map((node, index) => ({ node, index, offset: session.document.value(node, 'offset') ?? '', extent: session.document.value(node, 'extent') ?? '' })); });
 const canUndo = computed(() => {
@@ -193,33 +199,120 @@ const rootAvailableAttributes = computed(() => {
 
 async function openVehicle() {
   if (!allowVehicleSwitch()) return;
+  const request = ++openRequestToken;
   try {
-    const file = await desktop.openVehicle(); if (!file) return;
+    const file = await desktop.openVehicle(); if (!file || request !== openRequestToken) return;
     await loadOpenedVehicle(file);
   }
   catch (e) { fail(e); }
 }
 let vehicleLoadToken = 0;
-async function loadOpenedVehicle(file: OpenedFile) {
-  const token = ++vehicleLoadToken;
+let openRequestToken = 0;
+function captureVehicleTabState(): VehicleTabState | undefined {
+  if (!opened.value || !document.value) return;
+  return {
+    opened: { ...opened.value }, document: document.value, savedText: savedText.value, undoStack: [...undoStack.value],
+    baseReference: baseReference.value, baseOpened: baseOpened.value, baseDocument: baseDocument.value, baseAutomatic: baseAutomatic.value, baseError: baseError.value,
+    selectedId: selectedId.value, selectedEntrance: selectedEntrance.value, selectedTurretPivot: selectedTurretPivot.value, turretPreviewDegrees: turretPreviewDegrees.value,
+    collapsedGroups: [...collapsedGroups], expandedCrewSlots: [...expandedCrewSlots], expandedTurrets: [...expandedTurrets], lastEditedDoc: lastEditedDoc.value,
+    status: status.value, missing: [...missing.value], diagnostics: [...sceneDiagnostics.value],
+  };
+}
+function rememberActiveVehicleTab(): void {
+  const state = captureVehicleTabState(); if (!state) return;
+  vehicleTabs.value = vehicleTabs.value.map((tab) => tab.id === activeVehicleTabId.value ? { ...tab, state, preview: tab.preview && state.document.serialize() === state.savedText } : tab);
+}
+function retainVehicleTab(id = activeVehicleTabId.value): void {
+  vehicleTabs.value = vehicleTabs.value.map((tab) => tab.id === id && tab.preview ? { ...tab, preview: false } : tab);
+}
+function isVehicleTabDirty(tab: VehicleTab<VehicleTabState>): boolean { return tab.id === activeVehicleTabId.value ? dirty.value : vehicleTabDirty(tab); }
+function newVehicleTabState(file: OpenedFile): VehicleTabState {
   const parsed = new SourceDocument(file.text);
-  if (parsed.root?.name !== 'vehicle') {
-    throw new Error(`所选文件 ${file.name} 的根元素不是 <vehicle>`);
+  if (parsed.root?.name !== 'vehicle') throw new Error(`所选文件 ${file.name} 的根元素不是 <vehicle>`);
+  return {
+    opened: file, document: parsed, savedText: file.text, undoStack: [], baseReference: '', baseAutomatic: false, baseError: '',
+    selectedTurretPivot: false, turretPreviewDegrees: 0, collapsedGroups: [], expandedCrewSlots: [], expandedTurrets: [], lastEditedDoc: 'vehicle',
+    status: `已打开 ${file.name}`, missing: [], diagnostics: [],
+  };
+}
+async function loadOpenedVehicle(file: OpenedFile, replace = false) {
+  if (saving.value) return;
+  rememberActiveVehicleTab();
+  const existing = vehicleTabs.value.find((tab) => vehiclePathKey(tab.state.opened.path) === vehiclePathKey(file.path));
+  if (existing && !replace) { await activateVehicleTab(existing.id); return; }
+  const state = newVehicleTabState(file);
+  if (existing) {
+    vehicleTabs.value = vehicleTabs.value.map((tab) => tab.id === existing.id ? { ...tab, state } : tab);
+    if (activeVehicleTabId.value === existing.id) activeVehicleTabId.value = '';
+    await activateVehicleTab(existing.id);
+  } else {
+    const result = insertVehicleTab(vehicleTabs.value, state); vehicleTabs.value = result.tabs;
+    await activateVehicleTab(result.id);
   }
-  opened.value = file; document.value = parsed; savedText.value = file.text; undoStack.value = []; missing.value = []; collapsedGroups.clear(); expandedCrewSlots.clear(); expandedTurrets.clear(); selectedTurretPivot.value = false; turretPreviewDegrees.value = 0;
-  if (document.value.structuralErrors.length) status.value = `已打开 ${file.name}；检测到 ${document.value.structuralErrors.length} 处 XML 结构问题（保存时会提示）`;
-  await resolveAutomaticBase(token);
+}
+async function activateVehicleTab(id: string): Promise<void> {
+  if (saving.value) return;
+  ++openRequestToken;
+  if (id === activeVehicleTabId.value) return;
+  rememberActiveVehicleTab();
+  const tab = vehicleTabs.value.find((item) => item.id === id); if (!tab) return;
+  const token = ++vehicleLoadToken; ++weaponLoadToken;
+  if (validateTimer !== undefined) window.clearTimeout(validateTimer);
+  const state = tab.state; restoringVehicleTab = true;
+  activeVehicleTabId.value = id;
+  opened.value = { ...state.opened }; document.value = state.document; savedText.value = state.savedText; undoStack.value = [...state.undoStack];
+  baseReference.value = state.baseReference; baseOpened.value = state.baseOpened; baseDocument.value = state.baseDocument; baseAutomatic.value = state.baseAutomatic; baseError.value = state.baseError;
+  for (const [set, items] of [[collapsedGroups, state.collapsedGroups], [expandedCrewSlots, state.expandedCrewSlots], [expandedTurrets, state.expandedTurrets]] as const) { set.clear(); for (const item of items) (set as Set<string | number>).add(item); }
+  lastEditedDoc.value = state.lastEditedDoc; missing.value = [...state.missing]; sceneDiagnostics.value = [...state.diagnostics]; status.value = state.status;
+  weaponSession.value = undefined; weaponLoadError.value = '';
+  rebuildPreview(false); if (entries.value.some((entry) => entry.node.id === state.selectedId)) selectedId.value = state.selectedId;
+  selectedEntrance.value = state.selectedEntrance; selectedTurretPivot.value = state.selectedTurretPivot; turretPreviewDegrees.value = state.turretPreviewDegrees;
+  markDocumentChanged(); restoringVehicleTab = false;
+  void nextTick(() => vehicleTabsBar.value?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
+  if (!baseOpened.value) { await resolveAutomaticBase(token); if (token === vehicleLoadToken) rebuildPreview(); }
   if (token !== vehicleLoadToken) return;
-  rebuildPreview(false);
   if (hasRememberedResources.value) {
-    status.value = `已打开 ${file.name}；正在载入上次使用的资源预设…`;
     await indexRememberedResources(rememberedSelection, token);
   } else {
-    status.value = `已打开 ${file.name}；请配置资源文件夹`;
     await loadSoldier(token);
     if (token !== vehicleLoadToken) return;
     resourceDialog.value = true;
   }
+  if (token === vehicleLoadToken) { await loadSelectedWeaponEditor(); if (token === vehicleLoadToken) rememberActiveVehicleTab(); }
+}
+async function openVehiclePath(path: string): Promise<void> {
+  if (!allowVehicleSwitch()) return;
+  const existing = vehicleTabs.value.find((tab) => vehiclePathKey(tab.state.opened.path) === vehiclePathKey(path));
+  if (existing) { await activateVehicleTab(existing.id); return; }
+  const request = ++openRequestToken;
+  try { const file = await desktop.openVehiclePath(path); if (request === openRequestToken) await loadOpenedVehicle(file); }
+  catch (error) { if (request === openRequestToken) fail(error); }
+}
+async function requestCloseVehicleTab(id: string): Promise<void> {
+  if (saving.value) return;
+  ++openRequestToken;
+  const tab = vehicleTabs.value.find((item) => item.id === id); if (!tab) return;
+  if (isVehicleTabDirty(tab)) { closingVehicleTabId.value = id; return; }
+  await removeVehicleTab(id);
+}
+async function removeVehicleTab(id: string): Promise<void> {
+  const index = vehicleTabs.value.findIndex((tab) => tab.id === id); if (index < 0) return;
+  const active = id === activeVehicleTabId.value;
+  vehicleTabs.value = vehicleTabs.value.filter((tab) => tab.id !== id); closingVehicleTabId.value = '';
+  if (!active) return;
+  const next = vehicleTabs.value[Math.min(index, vehicleTabs.value.length - 1)];
+  if (next) { await activateVehicleTab(next.id); return; }
+  ++vehicleLoadToken; ++weaponLoadToken; ++openRequestToken;
+  activeVehicleTabId.value = ''; opened.value = undefined; document.value = undefined; savedText.value = ''; undoStack.value = [];
+  baseOpened.value = undefined; baseDocument.value = undefined; baseReference.value = ''; baseError.value = ''; baseAutomatic.value = false;
+  weaponSession.value = undefined; selectedEntrance.value = undefined; missing.value = []; sceneDiagnostics.value = [];
+  rebuildPreview(false); markDocumentChanged(); status.value = '请选择 .vehicle 文件';
+}
+async function saveAndCloseVehicleTab(): Promise<void> {
+  const id = closingVehicleTabId.value; if (!id || saving.value) return;
+  await activateVehicleTab(id);
+  if (closingVehicleTabId.value !== id || activeVehicleTabId.value !== id) return;
+  if (await save()) await removeVehicleTab(id);
 }
 async function resolveAutomaticBase(token = ++vehicleLoadToken) {
   baseOpened.value = undefined; baseDocument.value = undefined; baseAutomatic.value = false; baseError.value = '';
@@ -234,21 +327,24 @@ async function resolveAutomaticBase(token = ++vehicleLoadToken) {
   } catch (error) { if (token === vehicleLoadToken) baseError.value = message(error); }
 }
 async function chooseBaseVehicle() {
+  if (saving.value) return;
+  const token = vehicleLoadToken;
   try {
-    const chosen = await desktop.chooseVehicleBase(); if (!chosen) return;
+    const chosen = await desktop.chooseVehicleBase(); if (!chosen || token !== vehicleLoadToken || saving.value) return;
     if (chosen.path === opened.value?.path) { baseError.value = '基础文件不能选择当前载具自身'; return; }
     baseOpened.value = chosen; baseDocument.value = new SourceDocument(chosen.text); baseAutomatic.value = false; baseError.value = '';
-    rebuildPreview(); await validate(); status.value = `已手动指定基础载具：${chosen.name}`;
+    rebuildPreview(); await validate(); if (token === vehicleLoadToken) status.value = `已手动指定基础载具：${chosen.name}`;
   } catch (error) { fail(error); }
 }
 async function retryAutomaticBase() {
-  await resolveAutomaticBase(); rebuildPreview(); await validate();
+  if (saving.value) return;
+  const token = ++vehicleLoadToken;
+  await resolveAutomaticBase(token); if (token !== vehicleLoadToken) return; rebuildPreview(); await validate(); if (token !== vehicleLoadToken) return;
   status.value = baseOpened.value ? `已自动匹配基础载具：${baseOpened.value.name}` : baseError.value;
 }
 async function openBaseVehicle() {
   if (!baseOpened.value || !allowVehicleSwitch()) return;
-  try { await loadOpenedVehicle(await desktop.openVehiclePath(baseOpened.value.path)); }
-  catch (error) { fail(error); }
+  await openVehiclePath(baseOpened.value.path);
 }
 function recomputePreview(preserveSelection = true) {
   if (!document.value) { previewDocument.value = undefined; composition = undefined; entries.value = []; selectedId.value = undefined; selectedTurretPivot.value = false; turretPreviewDegrees.value = 0; return; }
@@ -260,9 +356,7 @@ function recomputePreview(preserveSelection = true) {
 function rebuildPreview(preserveSelection = true) { recomputePreview(preserveSelection); markSceneChanged(); }
 function allowVehicleSwitch(): boolean {
   if (saving.value) { status.value = '保存中，请稍后再切换载具'; return false; }
-  if (!anyDirty.value) return true;
-  const parts = [dirty.value ? '载具' : '', weaponDirtyCount.value ? `${weaponDirtyCount.value} 个武器` : ''].filter(Boolean);
-  return confirm(`有未保存修改（${parts.join('、')}），仍要打开另一辆载具吗？`);
+  return !closingVehicleTabId.value;
 }
 async function loadWorkspaceChildren(entry: VehicleWorkspaceEntry): Promise<void> {
   if (!entry.isDirectory || loadedWorkspaceDirs.has(entry.path)) return;
@@ -341,7 +435,7 @@ async function activateWorkspaceEntry(entry: VehicleWorkspaceEntry) {
   }
   if (!entry.isVehicle) { const warning = `“${entry.name}”不是 .vehicle 载具文件`; status.value = warning; alert(warning); return; }
   if (!allowVehicleSwitch()) return;
-  try { await loadOpenedVehicle(await desktop.openVehiclePath(entry.path)); }
+  try { await openVehiclePath(entry.path); }
   catch (error) { fail(error); }
 }
 async function indexRememberedResources(selection: ResourceSelection, token: number) {
@@ -359,6 +453,7 @@ async function resourcesApplied(selection: ResourceSelection, token = ++vehicleL
   hasRememberedResources.value = true;
   rememberedSelection = cloneResourceSelection(selection); supportModel.value = selection.supportModel; supportAnimations.value = selection.supportAnimations;
   resourceDialog.value = false; if (resourceChanged) invalidateSoldierAssets(); const soldierLoaded = await loadSoldier(token); if (token !== vehicleLoadToken) return; if (!soldierLoaded) { resourceDialog.value = true; return; } await validate(); if (token !== vehicleLoadToken) return; if (resourceChanged) resourceGeneration.value++; markSceneChanged(); for (const session of weaponSessions.values()) { try { await desktop.registerWeaponSession(session.path); } catch { /* 文件可能已在会话期间被移动或删除 */ } } await loadSelectedWeaponEditor();
+  if (token !== vehicleLoadToken) return;
   const diagnostics = catalog.scanDiagnostics; const total = diagnostics.duplicates.length + diagnostics.warnings.length;
   status.value = `已载入：${entries.value.filter((e) => e.kind === 'visual').length} 个外观，${entries.value.filter((e) => e.kind === 'slot').length} 个乘员位${total ? `；资源扫描发现 ${total} 个问题` : ''}`;
 }
@@ -397,6 +492,7 @@ async function loadSelectedWeaponEditor() {
       weaponSessions.set(sessionKey, session);
       try { await desktop.registerWeaponSession(session.path); } catch (error) { if (token === weaponLoadToken) status.value = `武器注册失败：${message(error)}`; }
     } else { session.key = key; catalog.setWeaponPreview(key, session.path, session.document.serialize()); }
+    if (token !== weaponLoadToken) return;
     weaponSession.value = session; weaponRevision.value++;
   } catch (error) { if (token === weaponLoadToken) { weaponSession.value = undefined; weaponLoadError.value = message(error); } }
 }
@@ -463,9 +559,12 @@ async function reloadWeaponShields() {
 }
 async function validate() {
   if (!previewDocument.value) return;
+  const token = vehicleLoadToken; const target = previewDocument.value;
   const diagnostics = catalog.scanDiagnostics;
+  const unresolved = await catalog.missing(target);
+  if (token !== vehicleLoadToken || target !== previewDocument.value) return;
   missing.value = [
-    ...(await catalog.missing(previewDocument.value)),
+    ...unresolved,
     ...diagnostics.duplicates.map((item) => `重复资源：${item}`),
     ...diagnostics.warnings.map((item) => `扫描警告：${item}`),
   ];
@@ -494,6 +593,7 @@ function pushSceneDiagnostic(message: string) { sceneDiagnostics.value = [...sce
 function clearSceneDiagnostics() { sceneDiagnostics.value = []; }
 function recordUndo() { lastEditedDoc.value = 'vehicle'; if (!document.value) return; const snapshot = document.value.serialize(); if (undoStack.value.at(-1) !== snapshot) undoStack.value = [...undoStack.value.slice(-99), snapshot]; }
 function recordWeaponUndo(session: WeaponSession) {
+  retainVehicleTab();
   lastEditedDoc.value = session.path; const snapshot = session.document.serialize();
   if (session.undoStack.at(-1) !== snapshot) session.undoStack = [...session.undoStack.slice(-99), snapshot];
 }
@@ -512,7 +612,7 @@ async function edit(field: { sourceNode?: SourceNode; attr: string; node?: Sourc
   if (INTEGER_ATTRS.has(field.attr) && !isValidNonNegativeInteger(value)) { status.value = `${field.attr} 需要非负整数，已忽略本次输入`; return; }
   recordUndo(); document.value.set(field.sourceNode, field.attr, value); markDocumentChanged();
   if (field.attr === 'file' && field.node === previewDocument.value?.root) {
-    await resolveAutomaticBase(); rebuildPreview(false); scheduleValidate();
+    const token = ++vehicleLoadToken; await resolveAutomaticBase(token); if (token !== vehicleLoadToken) return; rebuildPreview(false); scheduleValidate();
     status.value = baseError.value ? `基础载具解析失败：${baseError.value}` : `已更新基础载具引用：${value || '（无）'}`;
     return;
   }
@@ -600,7 +700,7 @@ async function addRootAttribute() {
   recordUndo();
   document.value.addAttribute(document.value.root, name, name === 'file' ? '' : ATTR_DEFAULTS[name] ?? '0'); markDocumentChanged(); newRootAttribute.value = '';
   if (name === 'file') {
-    await resolveAutomaticBase(); rebuildPreview(false); scheduleValidate();
+    const token = ++vehicleLoadToken; await resolveAutomaticBase(token); if (token !== vehicleLoadToken) return; rebuildPreview(false); scheduleValidate();
     status.value = baseError.value ? `基础载具解析失败：${baseError.value}` : '已加入基础载具引用（file 为空，请填写文件名）';
     return;
   }
@@ -611,7 +711,7 @@ async function deleteAttribute(field: { sourceNode?: SourceNode; attr: string; n
   if (!document.value || !field.sourceNode) { status.value = '继承属性不能在覆盖文件中删除'; return; }
   recordUndo(); const name = field.attr; document.value.removeAttribute(field.sourceNode, name); markDocumentChanged();
   if (name === 'file' && field.node === previewDocument.value?.root) {
-    await resolveAutomaticBase(); rebuildPreview(false); scheduleValidate();
+    const token = ++vehicleLoadToken; await resolveAutomaticBase(token); if (token !== vehicleLoadToken) return; rebuildPreview(false); scheduleValidate();
     status.value = baseError.value ? `基础载具解析失败：${baseError.value}` : '已删除基础载具引用';
     return;
   }
@@ -628,47 +728,58 @@ async function undo() {
   undoStack.value = undoStack.value.slice(0, -1); document.value = new SourceDocument(previous); document.value.restoreSaved(savedText.value); markDocumentChanged();
   const nextBaseReference = vehicleBaseReference(document.value) ?? '';
   if (previousBaseReference !== nextBaseReference) {
-    await resolveAutomaticBase();
+    const token = ++vehicleLoadToken; await resolveAutomaticBase(token); if (token !== vehicleLoadToken) return;
   }
   rebuildPreview(); scheduleValidate(); status.value = '已撤销上一次修改';
 }
-async function save(saveAs = false) {
-  if (!document.value || !opened.value || saving.value) return;
+async function save(saveAs = false): Promise<boolean> {
+  if (!document.value || !opened.value || saving.value) return false;
   const structuralErrors = document.value.structuralErrors;
   if (structuralErrors.length) {
     const detail = structuralErrors.slice(0, 5).join('\n');
-    if (!confirm(`该载具 XML 存在结构问题，保存后可能无法在游戏中加载：\n${detail}\n\n仍要保存吗？`)) { status.value = `已取消保存：存在 ${structuralErrors.length} 处 XML 结构问题`; return; }
+    if (!confirm(`该载具 XML 存在结构问题，保存后可能无法在游戏中加载：\n${detail}\n\n仍要保存吗？`)) { status.value = `已取消保存：存在 ${structuralErrors.length} 处 XML 结构问题`; return false; }
   }
   saving.value = true;
   try {
     if (!saveAs) {
       try {
         const disk = await desktop.readText(opened.value.path);
-        if (disk !== savedText.value && !confirm('该文件已被其它程序修改，仍要用当前内容覆盖吗？')) return;
+        if (disk !== savedText.value && !confirm('该文件已被其它程序修改，仍要用当前内容覆盖吗？')) return false;
       } catch (error) {
-        if (!confirm(`无法确认磁盘上的文件是否被修改：${message(error)}\n仍要强制覆盖吗？`)) return;
+        if (!confirm(`无法确认磁盘上的文件是否被修改：${message(error)}\n仍要强制覆盖吗？`)) return false;
       }
     }
-    const text = document.value.serialize(); const wasAutomaticBase = baseAutomatic.value; const saved = await desktop.saveVehicle(opened.value.path, text, saveAs); if (!saved) return; opened.value = { name: saved.name, path: saved.path, text }; savedText.value = text;
+    const protectedPaths = vehicleTabs.value.filter((tab) => tab.id !== activeVehicleTabId.value).map((tab) => tab.state.opened.path);
+    const text = document.value.serialize(); const wasAutomaticBase = baseAutomatic.value; const saved = await desktop.saveVehicle(opened.value.path, text, saveAs, protectedPaths); if (!saved) return false; opened.value = { name: saved.name, path: saved.path, text }; savedText.value = text;
     if (document.value.serialize() === text) { document.value.commit(text); document.value.markSaved(); }
     else { document.value.restoreSaved(text); }
     markDocumentChanged(); if (saveAs && wasAutomaticBase) await resolveAutomaticBase(); rebuildPreview(); status.value = saved.backupPath ? `已保存；备份：${saved.backupPath}` : `已保存：${saved.path}`;
+    retainVehicleTab(); rememberActiveVehicleTab(); return true;
   }
-  catch (e) { fail(e); }
+  catch (e) { fail(e); return false; }
   finally { saving.value = false; }
 }
 async function reload() { if (!opened.value || saving.value) { if (saving.value) status.value = '保存中，请稍后再重新载入'; return; }
-  if (anyDirty.value && !confirm('未保存修改将丢失，仍要重新载入吗？')) return; try { const text = await desktop.readText(opened.value.path); document.value = new SourceDocument(text); savedText.value = text; undoStack.value = []; if (baseAutomatic.value || !baseOpened.value) await resolveAutomaticBase(); rebuildPreview(); scheduleValidate(); status.value = '已从磁盘重新载入'; } catch (e) { fail(e); } }
+  if (dirty.value && !confirm('此载具的未保存修改将丢失，仍要重新载入吗？')) return;
+  const token = vehicleLoadToken; const file = opened.value;
+  try { const text = await desktop.readText(file.path); if (token !== vehicleLoadToken || saving.value) return; await loadOpenedVehicle({ ...file, text }, true); } catch (e) { if (token === vehicleLoadToken) fail(e); } }
 async function overrideChanged() { await validate(); resourceGeneration.value++; markSceneChanged(); await loadSelectedWeaponEditor(); }
 function fail(e: unknown) { status.value = `错误：${message(e)}`; }
 function message(e: unknown) { return e instanceof Error ? e.message : String(e); }
 function keydown(event: KeyboardEvent) {
+  if (closingVehicleTabId.value) { if (event.key === 'Escape' && !saving.value) closingVehicleTabId.value = ''; if (event.ctrlKey || event.metaKey) event.preventDefault(); return; }
   const mod = event.ctrlKey || event.metaKey;
   if (!mod) return;
   const key = event.key.toLowerCase();
   if (activeMode.value === 'map') return;
   if (activeMode.value === 'render') {
     if (key === 'o' && !event.shiftKey) { event.preventDefault(); void openVehicle(); }
+    return;
+  }
+  if (key === 'w') { event.preventDefault(); void requestCloseVehicleTab(activeVehicleTabId.value); return; }
+  if (key === 'tab') {
+    event.preventDefault(); const tabs = vehicleTabs.value; const index = tabs.findIndex((tab) => tab.id === activeVehicleTabId.value);
+    if (tabs.length) void activateVehicleTab(tabs[(index + (event.shiftKey ? -1 : 1) + tabs.length) % tabs.length].id);
     return;
   }
   if (event.shiftKey && key === 's') { event.preventDefault(); void save(true); return; }
@@ -681,8 +792,8 @@ function keydown(event: KeyboardEvent) {
 async function backupRestored(result: BackupRestoreResult) {
   const key = (path: string) => path.replaceAll('\\', '/').toLocaleLowerCase();
   try {
-    if (opened.value && key(opened.value.path) === key(result.sourcePath)) {
-      await loadOpenedVehicle(await desktop.openVehiclePath(result.sourcePath));
+    if (vehicleTabs.value.some((tab) => key(tab.state.opened.path) === key(result.sourcePath))) {
+      await loadOpenedVehicle(await desktop.openVehiclePath(result.sourcePath), true);
       status.value = `已从备份恢复并重新载入：${opened.value?.name ?? result.sourcePath}`;
       return;
     }
@@ -697,6 +808,7 @@ async function backupRestored(result: BackupRestoreResult) {
   } catch (error) { fail(error); }
 }
 watch(selectedWeaponKey, () => { void loadSelectedWeaponEditor(); });
+watch(documentRevision, () => { if (!restoringVehicleTab && dirty.value) retainVehicleTab(); }, { flush: 'sync' });
 let unlistenClose: UnlistenFn | undefined;
 let exiting = false;
 let closeRequestPending = false;
@@ -760,13 +872,13 @@ onBeforeUnmount(() => {
 <template>
   <main class="app-shell">
     <header class="topbar">
-      <div class="brand"><strong>RWR VEHICLE STUDIO</strong><small>0.6.1 PREVIEW</small></div>
+      <div class="brand"><strong>RWR VEHICLE STUDIO</strong><small>0.8</small></div>
       <nav>
         <span class="mode-tabs"><button :class="{ active: activeMode === 'editor' }" @click="activeMode = 'editor'">VEHICLE 编辑器</button><button :class="{ active: activeMode === 'render' }" @click="activeMode = 'render'">ICON 渲染</button><button :class="{ active: activeMode === 'map' }" @click="activeMode = 'map'">MAP 对象</button></span><span class="divider"></span>
         <template v-if="activeMode !== 'map'"><button @click="openVehicle">打开载具</button><button @click="resourceDialog = true">资源文件夹</button><button @click="overrideDialog = true">文件覆盖</button><button @click="backupDialog = true">管理备份</button></template>
         <template v-if="activeMode === 'editor'"><span class="divider"></span><button :disabled="!canUndo" title="Ctrl+Z" @click="undo">撤销</button><button :disabled="!document || saving" class="primary" @click="save(false)">保存</button><button :disabled="!document || saving" @click="save(true)">另存为</button><button :disabled="!document" @click="reload">重新载入</button></template>
       </nav>
-      <div v-if="activeMode !== 'map'" class="file-badge" :class="{ active: opened, dirty: anyDirty }"><b class="ellipsis">{{ opened?.name ?? '未打开文件' }}</b><span>{{ anyDirty ? `未保存：${dirty ? '载具' : ''}${dirty && weaponDirtyCount ? '、' : ''}${weaponDirtyCount ? `${weaponDirtyCount} 个武器` : ''}` : '磁盘同步' }}</span></div>
+      <div v-if="activeMode !== 'map'" class="file-badge" :class="{ active: opened, dirty: dirtyVehicleTabs.length || weaponDirtyCount }"><b class="ellipsis">{{ opened?.name ?? '未打开文件' }}</b><span>{{ dirtyVehicleTabs.length || weaponDirtyCount ? `未保存：${[dirtyVehicleTabs.length ? `${dirtyVehicleTabs.length} 个载具` : '', weaponDirtyCount ? `${weaponDirtyCount} 个武器` : ''].filter(Boolean).join('、')}` : '磁盘同步' }}</span></div>
       <div v-else class="file-badge active" :class="{ dirty: mapDirty }"><b>MAP OBJECT STUDIO</b><span>{{ mapDirty ? 'objects.svg 未保存' : '地图对象模式' }}</span></div>
       <details v-if="activeMode !== 'map' && dirtyWeaponSessions.length" class="unsaved-weapons">
         <summary>未保存武器 {{ dirtyWeaponSessions.length }}</summary>
@@ -780,7 +892,13 @@ onBeforeUnmount(() => {
       </details>
     </header>
 
-    <section v-show="activeMode === 'editor'" class="workspace">
+    <section v-show="activeMode === 'editor'" class="workspace" :class="{ 'has-vehicle-tabs': vehicleTabs.length }">
+      <div v-if="vehicleTabs.length" ref="vehicleTabsBar" class="vehicle-tabs" role="tablist" aria-label="载具标签页">
+        <div v-for="tab in vehicleTabs" :key="tab.id" class="vehicle-tab" :class="{ active: tab.id === activeVehicleTabId, preview: tab.preview, dirty: isVehicleTabDirty(tab) }" @auxclick.middle.prevent="requestCloseVehicleTab(tab.id)">
+          <button class="vehicle-tab-select" role="tab" :aria-selected="tab.id === activeVehicleTabId" :title="tab.state.opened.path" :disabled="saving" @click="activateVehicleTab(tab.id)" @dblclick="retainVehicleTab(tab.id)"><span class="ellipsis">{{ tab.state.opened.name }}</span></button>
+          <button class="vehicle-tab-close" :disabled="saving" :aria-label="`关闭 ${tab.state.opened.name}`" :title="isVehicleTabDirty(tab) ? '未保存 · 关闭' : '关闭'" @click="requestCloseVehicleTab(tab.id)"><span class="tab-close-cross">×</span><span v-if="isVehicleTabDirty(tab)" class="tab-dirty-dot">●</span></button>
+        </div>
+      </div>
       <aside class="scene-panel">
         <section class="vehicle-workspace collapse-group">
           <button type="button" class="collapse-summary" @click="toggleWorkspacePanel">
@@ -810,9 +928,9 @@ onBeforeUnmount(() => {
           <select v-model="newObjectType" :disabled="!vehicleSchema.objectTypes.length" title="候选来自当前工作区的 .vehicle 文件"><option disabled value="">选择对象类型</option><option v-for="name in vehicleSchema.objectTypes" :key="name" :value="name">{{ name }}</option></select>
           <button class="small" :disabled="!newObjectType" @click="addEmptyObject">增加空对象</button>
         </div>
-        <small v-if="document && !vehicleSchema.objectTypes.length" class="schema-hint">打开载具工作区后可从其中出现过的类型增加对象。</small>
+        <small v-if="document && !vehicleSchema.objectTypes.length" class="schema-hint">请先打开载具工作区。</small>
         <small v-if="schemaError" class="schema-hint" style="color:#ffc0c0">{{ schemaError }}</small>
-        <div v-if="!document" class="empty-state">打开载具文件后，此处会按物理、炮塔、外观和乘员分类。</div>
+        <div v-if="!document" class="empty-state">未打开载具</div>
         <div v-for="group in groups" :key="group.kind" class="collapse-group">
           <button type="button" class="collapse-summary" @click="toggleGroup(group.kind)">
             <span class="collapse-caret">{{ collapsedGroups.has(group.kind) ? '▸' : '▾' }}</span><span>{{ group.label }}</span><b>{{ group.items.length }}</b>
@@ -862,14 +980,13 @@ onBeforeUnmount(() => {
       </aside>
 
       <section class="viewport-panel">
-        <EditorViewport :document="previewDocument" :catalog="catalog" :soldier="soldier" :options="options" :selected-id="selectedId" :selected-entrance="selectedEntrance" :selected-turret-pivot="selectedTurretPivot" :turret-preview-degrees="turretPreviewDegrees" :revision="sceneRevision" :vehicle-key="opened?.path" :resource-generation="resourceGeneration" :editing-enabled="!saving" @select="select" @move="move" @pivot-move="moveTurretPivot" @rotate="rotateEntrance" @diagnostic="pushSceneDiagnostic" />
-        <div v-if="!document" class="viewport-empty"><b>NO VEHICLE LOADED</b><span>读取 .vehicle、OGRE .mesh 与引用纹理，在游戏外直接校准数字。</span><button class="primary" @click="openVehicle">选择载具文件</button></div>
+        <EditorViewport v-if="document" :document="previewDocument" :catalog="catalog" :soldier="soldier" :options="options" :selected-id="selectedId" :selected-entrance="selectedEntrance" :selected-turret-pivot="selectedTurretPivot" :turret-preview-degrees="turretPreviewDegrees" :revision="sceneRevision" :vehicle-key="opened?.path" :resource-generation="resourceGeneration" :editing-enabled="!saving" @select="select" @move="move" @pivot-move="moveTurretPivot" @rotate="rotateEntrance" @diagnostic="pushSceneDiagnostic" />
+        <div v-if="!document" class="viewport-empty"><b>NO VEHICLE LOADED</b><button class="primary" @click="openVehicle">选择载具文件</button></div>
         <div v-if="selectedTurretPivot" class="turret-pivot-editor">
           <b>炮塔旋转预览</b>
           <input v-model.number="turretPreviewDegrees" type="range" min="-180" max="180" step="1" />
           <label><input v-model.number="turretPreviewDegrees" type="number" min="-180" max="180" step="1" />°</label>
           <button type="button" class="tiny" @click="turretPreviewDegrees = 0">归零</button>
-          <small>仅预览旋转，不写入载具文件</small>
         </div>
         <div class="quick-options">
           <label><input v-model="options.showVisualBounds" type="checkbox" /> 外观框</label><label><input v-model="options.showBounds" type="checkbox" /> 碰撞框</label><label><input v-model="options.showShields" type="checkbox" /> 显示护盾范围</label><label><input v-model="options.showOccupants" type="checkbox" /> 乘员</label><label><input v-model="options.showOccupantPositions" type="checkbox" /> 显示乘员位置</label><label><input v-model="options.showEntrances" type="checkbox" /> 显示乘员进出范围</label><label><input v-model="options.animate" type="checkbox" /> 动画</label><label><input v-model="options.showBroken" type="checkbox" /> 损毁外观</label>
@@ -878,7 +995,6 @@ onBeforeUnmount(() => {
 
       <aside class="inspector">
         <div class="panel-title"><small>INSPECTOR</small><h2>{{ selected?.label ?? '属性编辑' }}</h2></div>
-        <p class="muted">数值修改即时进入预览；位置也可在视口拖动三轴箭头。保存只写载具 XML。</p>
         <div v-if="rootFields.length" class="field-list root-fields">
           <small class="root-heading">载具根元素</small>
           <label v-for="field in rootFields" class="field-row" :key="`root:${field.attr}`">
@@ -926,5 +1042,12 @@ onBeforeUnmount(() => {
     <Transition name="modal" appear><ResourceDialog v-if="resourceDialog" :catalog="catalog" :support-model="supportModel" :support-animations="supportAnimations" @close="resourceDialog = false" @apply="resourcesApplied" /></Transition>
     <Transition name="modal" appear><OverrideDialog v-if="overrideDialog" :catalog="catalog" @close="overrideDialog = false" @changed="overrideChanged" /></Transition>
     <Transition name="modal" appear><BackupManagerDialog v-if="backupDialog" :roots="backupRoots" @close="backupDialog = false" @restored="backupRestored" /></Transition>
+    <div v-if="closingVehicleTab" class="modal-backdrop vehicle-tab-confirm" role="dialog" aria-modal="true" aria-labelledby="close-vehicle-title">
+      <section class="dialog">
+        <header><h2 id="close-vehicle-title">保存更改？</h2></header>
+        <p>{{ closingVehicleTab.state.opened.name }} 有未保存的修改。</p>
+        <footer><button :disabled="saving" @click="closingVehicleTabId = ''">取消</button><button :disabled="saving" @click="removeVehicleTab(closingVehicleTabId)">不保存</button><button class="primary" :disabled="saving" @click="saveAndCloseVehicleTab">保存</button></footer>
+      </section>
+    </div>
   </main>
 </template>

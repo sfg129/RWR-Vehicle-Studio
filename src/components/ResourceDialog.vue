@@ -109,13 +109,11 @@ onMounted(async () => {
 <template>
   <div class="modal-backdrop"><section class="dialog resource-dialog">
     <header><div><small>RESOURCE WORKSPACE</small><h2>资源文件夹与人物预览</h2></div><button class="icon" :disabled="indexing" @click="$emit('close')">×</button></header>
-    <p class="muted">每类资源先检索主文件夹，未找到时再按编号依次检索次要来源；所有文件夹都会递归索引。单文件例外请在主界面“文件覆盖”中指定。</p>
     <fieldset class="dialog-fields" :disabled="indexing">
     <section class="preset-box">
       <strong>资源路径预设</strong>
       <div class="field-row preset-row"><select v-model="selectedPresetId" @change="presetName = selectedPreset?.name ?? ''"><option value="">选择已保存预设</option><option v-for="preset in presets" :key="preset.id" :value="preset.id">{{ preset.name }}</option></select><button :disabled="!selectedPreset" @click="loadPreset">载入预设</button><button :disabled="!selectedPreset" @click="removePreset">删除</button></div>
       <div class="field-row preset-row"><input v-model="presetName" placeholder="新预设名称；同名时覆盖更新" /><button @click="savePreset">保存当前路径</button></div>
-      <small>预设包含模型、纹理、武器的主文件夹及全部有序次要来源，以及人物模型和动画选择；最后使用的配置会在下次打开载具时自动载入。</small>
     </section>
     <section v-for="row in resourceRows" :key="row.kind" class="resource-source-group">
       <label class="field-row path-row primary-source-row">

@@ -42,8 +42,8 @@ export const desktop = {
   readBinary: async (path: string): Promise<ArrayBuffer> => decodeBase64(await invoke<string>('read_binary_base64', { path })),
   saveRenderPng: (suggestedName: string, base64: string) => invoke<string | null>('save_render_png', { suggestedName, base64 }),
   saveMapOverride: (outputRoot: string, mapName: string, text: string) => invoke<MapSaveResult>('save_map_override', { outputRoot, mapName, text }),
-  saveVehicle: (path: string, text: string, saveAs = false) =>
-    invoke<SavedFile | null>('save_vehicle', { path, text, saveAs }),
+  saveVehicle: (path: string, text: string, saveAs = false, protectedPaths: string[] = []) =>
+    invoke<SavedFile | null>('save_vehicle', { path, text, saveAs, protectedPaths }),
   registerVehicleSession: (path: string) => invoke<void>('register_vehicle_session', { path }),
   registerWeaponSession: (path: string) => invoke<void>('register_weapon_session', { path }),
   saveWeapon: (path: string, text: string) => invoke<SavedFile>('save_weapon', { path, text }),

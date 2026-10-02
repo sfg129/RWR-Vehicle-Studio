@@ -536,7 +536,7 @@ async fn save_render_png(app: AppHandle, suggested_name: String, base64: String)
 }
 
 #[tauri::command]
-async fn save_vehicle(app: AppHandle, state: State<'_, AppState>, path: String, text: String, save_as: bool) -> Result<Option<SavedFile>, String> {
+async fn save_vehicle(app: AppHandle, state: State<'_, AppState>, path: String, text: String, save_as: bool, protected_paths: Option<Vec<String>>) -> Result<Option<SavedFile>, String> {
     let target = if save_as {
         let default_name = Path::new(&path).file_name().and_then(|v| v.to_str()).unwrap_or("edited.vehicle").to_string();
         let (tx, mut rx) = tauri::async_runtime::channel(1);
@@ -552,6 +552,13 @@ async fn save_vehicle(app: AppHandle, state: State<'_, AppState>, path: String, 
         requested
     };
     let target = normalize_vehicle_save_path(target)?;
+    if save_as {
+        if let Ok(canonical) = target.canonicalize() {
+            if protected_paths.unwrap_or_default().iter().any(|path| Path::new(path).canonicalize().is_ok_and(|other| other == canonical)) {
+                return Err("目标文件已在其它标签页打开，请切换到对应标签页保存".into())
+            }
+        }
+    }
     let backup = write_backup(&target)?;
     atomic_write(&target, text.as_bytes())?;
     let canonical = target.canonicalize().map_err(|e| format!("无法确认已保存文件：{e}"))?;

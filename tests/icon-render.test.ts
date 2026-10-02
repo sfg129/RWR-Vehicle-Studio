@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { SourceDocument } from '../src/core/xml/source-document';
-import { anchoredIconOutputRect, containVisibleIconRect, denseForegroundPixelBounds, fittedIconOutputRect, foregroundPixelBounds, iconRenderParts } from '../src/editor/icon-render-controller';
+import { anchoredIconOutputRect, containVisibleIconRect, denseForegroundPixelBounds, fittedIconOutputRect, foregroundPixelBounds, iconFramingAnchorBounds, iconRenderParts } from '../src/editor/icon-render-controller';
 import { DEFAULT_ICON_RENDER_SETTINGS, normalizeIconRenderSettings } from '../src/core/icon-render/icon-render-presets';
 import { DEFAULT_RESOURCE_SELECTION, DEFAULT_WW2_BASE_MODEL_FOLDER, setWw2BaseModelFallback } from '../src/core/resources/resource-presets';
 
@@ -37,6 +37,7 @@ describe('独立图标渲染工作流', () => {
     expect(settings.ambient).toBe(DEFAULT_ICON_RENDER_SETTINGS.ambient);
     expect(settings.outputSize).toBe(512);
     expect(settings.background).toBe('#181818');
+    expect(normalizeIconRenderSettings({ framingMode: 'barrel' }).framingMode).toBe('barrel');
   });
 
   it('主体定标忽略稀疏长炮管，并用主体中心放置完整画面', () => {
@@ -62,6 +63,21 @@ describe('独立图标渲染工作流', () => {
     // body is not scaled down merely to accommodate its right-side barrel.
     expect(contained.x).toBeCloseTo(19);
     expect(contained.width).toBeCloseTo(120);
+  });
+
+  it('仅忽略天线时将武器炮管与主体合并定标，旧模式不变', () => {
+    const full = { x: 1, y: 0, width: 21, height: 12 }; // Includes a tall antenna.
+    const body = { x: 2, y: 5, width: 8, height: 6 };
+    const cannon = { x: 8, y: 6, width: 14, height: 2 };
+    expect(iconFramingAnchorBounds('body', full, body, cannon)).toEqual(body);
+    expect(iconFramingAnchorBounds('full', full, body, cannon)).toEqual(full);
+    const anchor = iconFramingAnchorBounds('barrel', full, body, cannon);
+    expect(anchor).toEqual({ x: 2, y: 5, width: 20, height: 6 });
+    expect(iconFramingAnchorBounds('barrel', full, body)).toEqual(body);
+    expect(iconFramingAnchorBounds('barrel', full, undefined, cannon)).toEqual(full);
+    const fitted = fittedIconOutputRect(anchor, 120, 0);
+    expect(fitted.width).toBeCloseTo(120);
+    expect(fitted.height).toBeCloseTo(36);
   });
 
   it('默认把实际 ww2_base 模型目录置于模组主模型目录之后', () => {
