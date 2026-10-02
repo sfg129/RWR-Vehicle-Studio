@@ -5,8 +5,9 @@ import IconRenderer from './components/IconRenderer.vue';
 import ResourceDialog from './components/ResourceDialog.vue';
 import OverrideDialog from './components/OverrideDialog.vue';
 import BackupManagerDialog from './components/BackupManagerDialog.vue';
+import WorkspaceSidebar from './components/WorkspaceSidebar.vue';
 import MapObjectEditor from './components/MapObjectEditor.vue';
-import { desktop, type BackupRestoreResult, type OpenedFile, type VehicleSchema, type VehicleWorkspace, type VehicleWorkspaceEntry } from './platform/desktop-api';
+import { desktop, type BackupSettings, type BackupRestoreResult, type OpenedFile, type VehicleSchema, type VehicleWorkspace, type VehicleWorkspaceEntry } from './platform/desktop-api';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog';
 import { exit } from '@tauri-apps/plugin-process';
@@ -28,7 +29,7 @@ import {
   setWw2BaseModelFallback,
   type ResourceSelection,
 } from './core/resources/resource-presets';
-import { flattenWorkspace, loadWorkspacePreferences, saveWorkspacePreferences } from './core/workspace/vehicle-workspace';
+import { flattenWorkspace, loadWorkspacePreferences, saveWorkspacePreferences, revealWorkspacePath } from './core/workspace/vehicle-workspace';
 import { createDirtyComputed, createEditorRevisions } from './core/editor/revision-state';
 import { insertVehicleTab, vehiclePathKey, vehicleTabDirty, type VehicleTab } from './core/editor/vehicle-tabs';
 import type { CrewGuideKind } from './editor/scene-controller';
@@ -55,6 +56,7 @@ const savedWorkspace = loadWorkspacePreferences();
 const vehicleWorkspace = ref<VehicleWorkspace>(); const workspaceError = ref(''); const schemaError = ref(''); const workspacePanelOpen = ref(savedWorkspace.panelOpen);
 const expandedWorkspacePaths = reactive(new Set<string>(savedWorkspace.expanded));
 const loadedWorkspaceDirs = new Set<string>();
+const loadingWorkspaceDirs = new WeakMap<VehicleWorkspaceEntry, Promise<void>>();
 const vehicleSchema = ref<VehicleSchema>({ objectTypes: [], attributes: {}, skipped: [] }); const newObjectType = ref(''); const newAttribute = ref(''); const newRootAttribute = ref(''); let schemaGeneration = 0;
 interface WeaponSession { key: string; path: string; name: string; document: SourceDocument; savedText: string; undoStack: string[] }
 const weaponSessions = new Map<string, WeaponSession>(); const weaponSession = ref<WeaponSession>(); const weaponLoadError = ref(''); const weaponRevision = ref(0); const weaponDirtyCount = ref(0);
@@ -74,6 +76,23 @@ const activeVehicleTabId = ref('');
 const closingVehicleTabId = ref('');
 const closingVehicleTab = computed(() => vehicleTabs.value.find((tab) => tab.id === closingVehicleTabId.value));
 const vehicleTabsBar = ref<HTMLElement>();
+const workspaceTree = ref<HTMLElement>();
+const backupEnabled = ref(false);
+function backupSettingsChanged(settings: BackupSettings) {
+  backupEnabled.value = settings.enabled;
+  if (!settings.enabled) localStorage.removeItem(RECOVERY_KEY);
+}
+let workspaceRevealToken = 0;
+async function revealActiveVehicle() {
+  const token = ++workspaceRevealToken; const path = opened.value?.path; const workspace = vehicleWorkspace.value;
+  if (!path || !workspace) return;
+  const current = () => token === workspaceRevealToken && workspace === vehicleWorkspace.value && opened.value?.path === path;
+  const found = await revealWorkspacePath(workspace.entries, path, expandedWorkspacePaths, loadWorkspaceChildren, current);
+  if (!found || !current()) return;
+  workspacePanelOpen.value = true; persistVehicleWorkspace();
+  await nextTick();
+  if (current()) workspaceTree.value?.querySelector('.workspace-entry.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
 let restoringVehicleTab = false;
 
 // 灾难关闭快速备份：脏状态确认退出时写入 localStorage，下次启动提示恢复。
@@ -85,6 +104,7 @@ interface RecoverySnapshot {
   weapons: { key: string; path: string; name: string; workingText: string; savedText: string }[];
 }
 function captureRecoverySnapshot(): void {
+  if (!backupEnabled.value) { localStorage.removeItem(RECOVERY_KEY); return; }
   rememberActiveVehicleTab();
   const vehicles = vehicleTabs.value.filter(vehicleTabDirty).map(({ state }) => ({ name: state.opened.name, path: state.opened.path, workingText: state.document.serialize(), savedText: state.savedText }));
   const weapons = [...weaponSessions.values()]
@@ -129,6 +149,7 @@ async function applyRecoverySnapshot(recovery: RecoverySnapshot): Promise<void> 
   }
 }
 async function maybeOfferRecovery(): Promise<void> {
+  if (!backupEnabled.value) return;
   const recovery = readRecoverySnapshot(); if (!recovery) return;
   let confirmed = false;
   try {
@@ -253,7 +274,7 @@ async function loadOpenedVehicle(file: OpenedFile, replace = false) {
 async function activateVehicleTab(id: string): Promise<void> {
   if (saving.value) return;
   ++openRequestToken;
-  if (id === activeVehicleTabId.value) return;
+  if (id === activeVehicleTabId.value) { void revealActiveVehicle(); return; }
   rememberActiveVehicleTab();
   const tab = vehicleTabs.value.find((item) => item.id === id); if (!tab) return;
   const token = ++vehicleLoadToken; ++weaponLoadToken;
@@ -268,6 +289,7 @@ async function activateVehicleTab(id: string): Promise<void> {
   rebuildPreview(false); if (entries.value.some((entry) => entry.node.id === state.selectedId)) selectedId.value = state.selectedId;
   selectedEntrance.value = state.selectedEntrance; selectedTurretPivot.value = state.selectedTurretPivot; turretPreviewDegrees.value = state.turretPreviewDegrees;
   markDocumentChanged(); restoringVehicleTab = false;
+  void revealActiveVehicle();
   void nextTick(() => vehicleTabsBar.value?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
   if (!baseOpened.value) { await resolveAutomaticBase(token); if (token === vehicleLoadToken) rebuildPreview(); }
   if (token !== vehicleLoadToken) return;
@@ -359,10 +381,18 @@ function allowVehicleSwitch(): boolean {
   return !closingVehicleTabId.value;
 }
 async function loadWorkspaceChildren(entry: VehicleWorkspaceEntry): Promise<void> {
+  const pending = loadingWorkspaceDirs.get(entry); if (pending) return pending;
   if (!entry.isDirectory || loadedWorkspaceDirs.has(entry.path)) return;
-  loadedWorkspaceDirs.add(entry.path);
-  try { entry.children = await desktop.listWorkspaceDir(entry.path); }
-  catch (error) { loadedWorkspaceDirs.delete(entry.path); status.value = `目录读取失败：${entry.path}（${message(error)}）`; }
+  const workspace = vehicleWorkspace.value;
+  const request = (async () => {
+    try {
+      entry.children = await desktop.listWorkspaceDir(entry.path);
+      if (vehicleWorkspace.value === workspace) loadedWorkspaceDirs.add(entry.path);
+    } catch (error) { status.value = `目录读取失败：${entry.path}（${message(error)}）`; }
+    finally { loadingWorkspaceDirs.delete(entry); }
+  })();
+  loadingWorkspaceDirs.set(entry, request);
+  return request;
 }
 async function loadExpandedWorkspaceChildren(entries: VehicleWorkspaceEntry[]): Promise<void> {
   for (const entry of entries) {
@@ -377,6 +407,7 @@ async function chooseVehicleWorkspace() {
     const chosen = await desktop.chooseVehicleWorkspace(); if (!chosen) return;
     vehicleWorkspace.value = chosen; workspaceError.value = ''; schemaError.value = ''; expandedWorkspacePaths.clear(); loadedWorkspaceDirs.clear(); workspacePanelOpen.value = true; persistVehicleWorkspace();
     status.value = `载具工作区：${chosen.root}`;
+    void revealActiveVehicle();
     await refreshVehicleSchema(chosen.root);
   } catch (error) { workspaceError.value = message(error); fail(error); }
 }
@@ -532,7 +563,7 @@ async function saveWeaponSession(session: WeaponSession) {
     if (session.document.serialize() === text) { session.document.commit(text); }
     else { session.document.restoreSaved(text); }
     catalog.setWeaponPreview(session.key, session.path, text); weaponRevision.value++; updateWeaponDirtyCount(); markSceneChanged();
-    status.value = `已保存武器：${saved.path}；备份：${saved.backupPath}`;
+    status.value = saved.backupPath ? `已保存武器：${saved.path}；备份：${saved.backupPath}` : `已保存武器：${saved.path}`;
   } catch (error) { fail(error); }
 }
 function discardWeaponSession(session: WeaponSession) {
@@ -859,6 +890,7 @@ onMounted(async () => {
       }
     });
   } catch { /* 纯浏览器 / 非 Tauri runtime 时没有原生 close guard */ }
+  try { backupSettingsChanged(await desktop.getBackupSettings()); } catch (error) { fail(error); }
   await restoreVehicleWorkspace(); nextTick();
   await maybeOfferRecovery();
 });
@@ -872,7 +904,7 @@ onBeforeUnmount(() => {
 <template>
   <main class="app-shell">
     <header class="topbar">
-      <div class="brand"><strong>RWR VEHICLE STUDIO</strong><small>0.8</small></div>
+      <div class="brand"><strong>RWR VEHICLE STUDIO</strong><small>0.81</small></div>
       <nav>
         <span class="mode-tabs"><button :class="{ active: activeMode === 'editor' }" @click="activeMode = 'editor'">VEHICLE 编辑器</button><button :class="{ active: activeMode === 'render' }" @click="activeMode = 'render'">ICON 渲染</button><button :class="{ active: activeMode === 'map' }" @click="activeMode = 'map'">MAP 对象</button></span><span class="divider"></span>
         <template v-if="activeMode !== 'map'"><button @click="openVehicle">打开载具</button><button @click="resourceDialog = true">资源文件夹</button><button @click="overrideDialog = true">文件覆盖</button><button @click="backupDialog = true">管理备份</button></template>
@@ -899,26 +931,26 @@ onBeforeUnmount(() => {
           <button class="vehicle-tab-close" :disabled="saving" :aria-label="`关闭 ${tab.state.opened.name}`" :title="isVehicleTabDirty(tab) ? '未保存 · 关闭' : '关闭'" @click="requestCloseVehicleTab(tab.id)"><span class="tab-close-cross">×</span><span v-if="isVehicleTabDirty(tab)" class="tab-dirty-dot">●</span></button>
         </div>
       </div>
-      <aside class="scene-panel">
+      <WorkspaceSidebar :collapsed="!workspacePanelOpen">
+        <template #workspace>
         <section class="vehicle-workspace collapse-group">
           <button type="button" class="collapse-summary" @click="toggleWorkspacePanel">
             <span class="collapse-caret">{{ workspacePanelOpen ? '▾' : '▸' }}</span><span>载具工作区</span><b>{{ vehicleWorkspace ? workspaceRows.length : 0 }}</b>
           </button>
-          <Transition @enter="onCollapseEnter" @leave="onCollapseLeave">
-            <div v-show="workspacePanelOpen" class="collapse-body">
+            <div v-show="workspacePanelOpen" class="workspace-body">
               <div class="workspace-toolbar"><span class="ellipsis" :title="vehicleWorkspace?.root">{{ vehicleWorkspace?.root ?? '尚未选择工作区' }}</span><button class="small" @click="chooseVehicleWorkspace">打开文件夹</button></div>
               <div v-if="workspaceError" class="workspace-error">{{ workspaceError }}</div>
               <div v-else-if="vehicleWorkspace && !workspaceRows.length" class="workspace-empty">此文件夹为空</div>
-              <div v-else class="workspace-tree">
+              <div v-else ref="workspaceTree" class="workspace-tree">
                 <TransitionGroup name="tree" tag="div">
-                  <button v-for="row in workspaceRows" :key="row.entry.path" class="list-item workspace-entry" :class="{ directory: row.entry.isDirectory, vehicle: row.entry.isVehicle, other: !row.entry.isDirectory && !row.entry.isVehicle, active: opened?.path === row.entry.path }" :style="{ paddingLeft: `${9 + row.depth * 14}px` }" :title="row.entry.path" @click="activateWorkspaceEntry(row.entry)">
+                  <button v-for="row in workspaceRows" :key="row.entry.path" class="list-item workspace-entry" :class="{ directory: row.entry.isDirectory, vehicle: row.entry.isVehicle, other: !row.entry.isDirectory && !row.entry.isVehicle, active: opened && vehiclePathKey(opened.path) === vehiclePathKey(row.entry.path) }" :style="{ paddingLeft: `${9 + row.depth * 14}px` }" :title="row.entry.path" @click="activateWorkspaceEntry(row.entry)">
                     <span class="workspace-kind">{{ row.entry.isDirectory ? (expandedWorkspacePaths.has(row.entry.path) ? '▾' : '▸') : row.entry.isVehicle ? 'V' : '·' }}</span><span class="ellipsis">{{ row.entry.name }}</span>
                   </button>
                 </TransitionGroup>
               </div>
             </div>
-          </Transition>
         </section>
+        </template>
         <section v-if="baseReference" class="base-vehicle-box" :class="{ missing: !baseOpened }">
           <div><small>BASE VEHICLE</small><b class="ellipsis">{{ baseOpened?.name ?? baseReference }}</b><span class="ellipsis">{{ baseOpened ? (baseAutomatic ? '同目录自动匹配' : '手动指定') : baseError }}</span></div>
           <div class="base-actions"><button v-if="baseOpened" class="tiny" @click="openBaseVehicle">打开基础</button><button class="tiny" @click="chooseBaseVehicle">手动选择</button><button v-if="!baseAutomatic" class="tiny" @click="retryAutomaticBase">自动匹配</button></div>
@@ -977,7 +1009,7 @@ onBeforeUnmount(() => {
         </div>
         <div v-if="missing.length" class="missing-box"><strong>未解析资源 {{ missing.length }}</strong><span class="ellipsis" v-for="item in missing.slice(0, 12)" :key="item">{{ item }}</span><button @click="overrideDialog = true">指定单文件覆盖</button></div>
         <div v-if="sceneDiagnostics.length" class="missing-box"><strong>场景诊断 {{ sceneDiagnostics.length }}</strong><span class="ellipsis" v-for="item in sceneDiagnostics" :key="item">{{ item }}</span><button @click="clearSceneDiagnostics">清空</button></div>
-      </aside>
+      </WorkspaceSidebar>
 
       <section class="viewport-panel">
         <EditorViewport v-if="document" :document="previewDocument" :catalog="catalog" :soldier="soldier" :options="options" :selected-id="selectedId" :selected-entrance="selectedEntrance" :selected-turret-pivot="selectedTurretPivot" :turret-preview-degrees="turretPreviewDegrees" :revision="sceneRevision" :vehicle-key="opened?.path" :resource-generation="resourceGeneration" :editing-enabled="!saving" @select="select" @move="move" @pivot-move="moveTurretPivot" @rotate="rotateEntrance" @diagnostic="pushSceneDiagnostic" />
@@ -1041,7 +1073,7 @@ onBeforeUnmount(() => {
     <footer v-if="activeMode !== 'map'" class="statusbar"><span>{{ status }}</span><span class="ellipsis">{{ opened?.path ?? '' }}</span></footer>
     <Transition name="modal" appear><ResourceDialog v-if="resourceDialog" :catalog="catalog" :support-model="supportModel" :support-animations="supportAnimations" @close="resourceDialog = false" @apply="resourcesApplied" /></Transition>
     <Transition name="modal" appear><OverrideDialog v-if="overrideDialog" :catalog="catalog" @close="overrideDialog = false" @changed="overrideChanged" /></Transition>
-    <Transition name="modal" appear><BackupManagerDialog v-if="backupDialog" :roots="backupRoots" @close="backupDialog = false" @restored="backupRestored" /></Transition>
+    <Transition name="modal" appear><BackupManagerDialog v-if="backupDialog" :roots="backupRoots" @close="backupDialog = false" @restored="backupRestored" @settings-changed="backupSettingsChanged" /></Transition>
     <div v-if="closingVehicleTab" class="modal-backdrop vehicle-tab-confirm" role="dialog" aria-modal="true" aria-labelledby="close-vehicle-title">
       <section class="dialog">
         <header><h2 id="close-vehicle-title">保存更改？</h2></header>

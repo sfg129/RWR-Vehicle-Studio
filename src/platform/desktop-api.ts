@@ -8,6 +8,7 @@ export interface VehicleSchema { objectTypes: string[]; attributes: Record<strin
 export interface ResourceFolderScan { index: Record<string, string>; duplicates: string[]; warnings: string[] }
 export interface BackupEntry { backupPath: string; sourcePath: string; sourceName: string; backupName: string; modifiedMs: number; size: number; sourceExists: boolean }
 export interface BackupRestoreResult { backupPath: string; sourcePath: string }
+export interface BackupSettings { enabled: boolean; directory: string; defaultDirectory: string }
 export interface MapSaveResult { path: string; backupPath?: string; size: number }
 export interface MapWorkspaceEntry { name: string; path: string; svgFiles: string[]; hasObjects: boolean }
 export interface MapWorkspace { root: string; entries: MapWorkspaceEntry[] }
@@ -48,6 +49,9 @@ export const desktop = {
   registerWeaponSession: (path: string) => invoke<void>('register_weapon_session', { path }),
   saveWeapon: (path: string, text: string) => invoke<SavedFile>('save_weapon', { path, text }),
   listBackups: (roots: string[]) => invoke<BackupEntry[]>('list_backups', { roots }),
+  getBackupSettings: () => invoke<BackupSettings>('get_backup_settings'),
+  configureBackups: (enabled: boolean, directory?: string) => invoke<BackupSettings>('configure_backups', { enabled, directory }),
+  openBackupDirectory: () => invoke<void>('open_backup_directory'),
   readBackup: (path: string) => invoke<string>('read_backup', { path }),
   restoreBackup: (path: string) => invoke<BackupRestoreResult>('restore_backup', { path }),
   deleteBackups: (paths: string[]) => invoke<number>('delete_backups', { paths }),

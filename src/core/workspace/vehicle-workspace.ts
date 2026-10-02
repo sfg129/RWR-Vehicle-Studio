@@ -1,4 +1,21 @@
 import type { VehicleWorkspaceEntry } from '../../platform/desktop-api';
+import { vehiclePathKey } from '../editor/vehicle-tabs';
+
+export async function revealWorkspacePath(entries: VehicleWorkspaceEntry[], path: string, expanded: Set<string>, loadChildren: (entry: VehicleWorkspaceEntry) => Promise<void>, current: () => boolean = () => true): Promise<boolean> {
+  const key = vehiclePathKey(path);
+  for (const entry of entries) {
+    if (!current()) return false;
+    const entryKey = vehiclePathKey(entry.path).replace(/\/$/, '');
+    if (entryKey === key && entry.isVehicle) return true;
+    if (entry.isDirectory && key.startsWith(`${entryKey}/`)) {
+      await loadChildren(entry);
+      if (!current()) return false;
+      expanded.add(entry.path);
+      return revealWorkspacePath(entry.children, path, expanded, loadChildren, current);
+    }
+  }
+  return false;
+}
 
 export interface WorkspaceRow { entry: VehicleWorkspaceEntry; depth: number }
 export interface WorkspacePreferences { root: string; expanded: string[]; panelOpen: boolean }

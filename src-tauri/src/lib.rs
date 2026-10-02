@@ -4,6 +4,8 @@ use std::{collections::{BTreeMap, BTreeSet, HashMap, HashSet}, fs, path::{Path, 
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use walkdir::WalkDir;
+mod backups;
+use backups::{BackupSettings, BackupStore};
 
 #[derive(Default)]
 struct AppState {
@@ -11,6 +13,7 @@ struct AppState {
     writable_weapons: Mutex<HashSet<PathBuf>>,
     writable_map_dirs: Mutex<HashSet<PathBuf>>,
     managed_backups: Mutex<HashMap<PathBuf, PathBuf>>,
+    backup_store: Mutex<BackupStore>,
     schema_cache: Mutex<HashMap<PathBuf, SchemaCacheEntry>>,
 }
 
@@ -559,7 +562,7 @@ async fn save_vehicle(app: AppHandle, state: State<'_, AppState>, path: String, 
             }
         }
     }
-    let backup = write_backup(&target)?;
+    let backup = write_backup(&target, &state)?;
     atomic_write(&target, text.as_bytes())?;
     let canonical = target.canonicalize().map_err(|e| format!("无法确认已保存文件：{e}"))?;
     state.writable.lock().map_err(|_| "文件权限状态不可用")?.insert(canonical.clone());
@@ -574,7 +577,7 @@ fn save_weapon_impl(path: String, text: String, state: &AppState) -> Result<Save
     if !state.writable_weapons.lock().map_err(|_| "武器写入权限状态不可用")?.contains(&target) {
         return Err("拒绝保存：该武器文件不是本次会话打开的武器".into())
     }
-    let backup = write_backup(&target)?;
+    let backup = write_backup(&target, state)?;
     atomic_write(&target, text.as_bytes())?;
     Ok(SavedFile { name: file_name(&target), path: display(&target), backup_path: backup.map(|p| display(&p)) })
 }
@@ -635,10 +638,12 @@ fn backup_roots(roots: Vec<String>, state: &AppState) -> Result<Vec<PathBuf>, St
 
 #[tauri::command]
 fn list_backups(roots: Vec<String>, state: State<'_, AppState>) -> Result<Vec<BackupEntry>, String> {
+    let central = state.backup_store.lock().map_err(|_| "备份设置不可用")?.entries()?;
     let mut paths = BTreeSet::new();
+    paths.extend(central.keys().cloned());
     for root in backup_roots(roots, state.inner())? {
         for entry in WalkDir::new(root).follow_links(false).into_iter().filter_map(Result::ok) {
-            if entry.file_type().is_file() && backup_source_path(entry.path()).is_some() {
+            if entry.file_type().is_file() && backup_source_path(entry.path()).is_some() && !entry.path().parent().is_some_and(|p| p.join("source.json").exists()) {
                 if let Ok(canonical) = entry.path().canonicalize() { paths.insert(canonical); }
             }
         }
@@ -646,7 +651,7 @@ fn list_backups(roots: Vec<String>, state: State<'_, AppState>) -> Result<Vec<Ba
     let mut managed = HashMap::new();
     let mut entries = Vec::new();
     for backup in paths {
-        let Some(source) = backup_source_path(&backup) else { continue };
+        let Some(source) = central.get(&backup).cloned().or_else(|| backup_source_path(&backup)) else { continue };
         let metadata = match fs::metadata(&backup) { Ok(value) => value, Err(_) => continue };
         let modified_ms = metadata.modified().ok().and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok()).map(|value| value.as_millis()).unwrap_or(0);
         managed.insert(backup.clone(), source.clone());
@@ -677,9 +682,13 @@ fn read_backup(path: String, state: State<'_, AppState>) -> Result<String, Strin
 
 #[tauri::command]
 fn restore_backup(path: String, state: State<'_, AppState>) -> Result<BackupRestoreResult, String> {
-    let (backup, source) = registered_backup(&path, state.inner())?;
+    restore_backup_impl(path, state.inner())
+}
+
+fn restore_backup_impl(path: String, state: &AppState) -> Result<BackupRestoreResult, String> {
+    let (backup, source) = registered_backup(&path, state)?;
     let bytes = fs::read(&backup).map_err(|e| format!("读取备份失败：{e}"))?;
-    if source.exists() { write_backup(&source)?; }
+    if source.exists() { write_backup(&source, state)?; }
     atomic_write(&source, &bytes)?;
     let canonical_source = source.canonicalize().map_err(|e| format!("无法确认恢复后的源文件：{e}"))?;
     if canonical_source.extension().and_then(|value| value.to_str()).is_some_and(|value| value.eq_ignore_ascii_case("weapon")) {
@@ -699,25 +708,36 @@ fn delete_backups(paths: Vec<String>, state: State<'_, AppState>) -> Result<usiz
 }
 
 /// Keep only two generations (`.bak` and `.bak1`); returns the newest backup path.
-fn write_backup(target: &Path) -> Result<Option<PathBuf>, String> {
-    if !target.exists() { return Ok(None) }
-    let backup = PathBuf::from(format!("{}.bak", display(target)));
-    let backup1 = PathBuf::from(format!("{}1", display(&backup)));
-    let _ = fs::remove_file(&backup1);
-    if backup.exists() { fs::rename(&backup, &backup1).map_err(|e| format!("轮换备份失败：{e}"))?; }
-    if let Some(parent) = target.parent() {
-        let prefix = format!("{}.bak", file_name(target)).to_ascii_lowercase();
-        if let Ok(items) = fs::read_dir(parent) {
-            for item in items.filter_map(Result::ok) {
-                let name = item.file_name().to_string_lossy().to_ascii_lowercase();
-                if let Some(suffix) = name.strip_prefix(&prefix) {
-                    if suffix.parse::<usize>().is_ok_and(|generation| generation >= 2) { let _ = fs::remove_file(item.path()); }
-                }
-            }
-        }
-    }
-    fs::copy(target, &backup).map_err(|e| format!("创建备份失败：{e}"))?;
-    Ok(Some(backup))
+fn write_backup(target: &Path, state: &AppState) -> Result<Option<PathBuf>, String> {
+    state.backup_store.lock().map_err(|_| "备份设置不可用")?.write(target)
+}
+
+#[tauri::command]
+fn get_backup_settings(state: State<'_, AppState>) -> Result<BackupSettings, String> {
+    Ok(state.backup_store.lock().map_err(|_| "备份设置不可用")?.settings.clone())
+}
+
+#[tauri::command]
+fn configure_backups(enabled: bool, directory: Option<String>, state: State<'_, AppState>) -> Result<BackupSettings, String> {
+    state.backup_store.lock().map_err(|_| "备份设置不可用")?.configure(enabled, directory)
+}
+
+#[tauri::command]
+fn open_backup_directory(state: State<'_, AppState>) -> Result<(), String> {
+    let directory = state.backup_store.lock().map_err(|_| "备份设置不可用")?.settings.directory.clone();
+    fs::create_dir_all(&directory).map_err(|e| format!("无法创建备份目录：{e}"))?;
+    let directory = PathBuf::from(directory).canonicalize().map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    let mut command = std::process::Command::new("explorer.exe");
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let mut command = std::process::Command::new("xdg-open");
+    let directory = display(&directory);
+    #[cfg(target_os = "windows")]
+    let directory = if let Some(path) = directory.strip_prefix("\\\\?\\UNC\\") { format!("\\\\{path}") } else { directory.strip_prefix("\\\\?\\").unwrap_or(&directory).to_string() };
+    command.arg(directory).spawn().map_err(|e| format!("打开备份目录失败：{e}"))?;
+    Ok(())
 }
 
 /// Write bytes to a unique same-directory temp file, fsync, then replace the target.
@@ -917,14 +937,17 @@ mod tests {
     #[test]
     fn weapon_save_creates_backup_and_replaces_text() {
         let unique = format!("rwrstudio-weapon-save-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
-        let path = std::env::temp_dir().join(format!("{unique}.weapon")); let backup = PathBuf::from(format!("{}.bak", display(&path)));
+        let path = std::env::temp_dir().join(format!("{unique}.weapon"));
         fs::write(&path, "<weapon><shield offset=\"0 0 0\" extent=\"1 1 1\"/></weapon>").unwrap();
         let state = AppState::default();
+        let backup_dir = std::env::temp_dir().join(format!("{unique}-backups"));
+        state.backup_store.lock().unwrap().settings.directory = display(&backup_dir);
         state.writable_weapons.lock().unwrap().insert(path.canonicalize().unwrap());
         let saved = save_weapon_impl(display(&path), "<weapon><shield offset=\"1 2 3\" extent=\"4 5 6\"/></weapon>".into(), &state).unwrap();
+        let backup = PathBuf::from(saved.backup_path.as_ref().unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap(), "<weapon><shield offset=\"1 2 3\" extent=\"4 5 6\"/></weapon>");
         assert!(fs::read_to_string(&backup).unwrap().contains("offset=\"0 0 0\"")); assert!(saved.backup_path.as_deref().is_some_and(|value| value.ends_with(".weapon.bak")));
-        let _ = fs::remove_file(path); let _ = fs::remove_file(backup);
+        let _ = fs::remove_file(path); let _ = fs::remove_dir_all(backup_dir);
     }
 
     #[test]
@@ -933,11 +956,14 @@ mod tests {
         let path = std::env::temp_dir().join(format!("{unique}.weapon"));
         fs::write(&path, "<weapon>v0</weapon>").unwrap();
         let state = AppState::default();
+        let backup_dir = std::env::temp_dir().join(format!("{unique}-backups"));
+        state.backup_store.lock().unwrap().settings.directory = display(&backup_dir);
         state.writable_weapons.lock().unwrap().insert(path.canonicalize().unwrap());
         for v in 1..=4 { save_weapon_impl(display(&path), format!("<weapon>v{v}</weapon>"), &state).unwrap(); }
         assert_eq!(fs::read_to_string(&path).unwrap(), "<weapon>v4</weapon>");
-        let bak = PathBuf::from(format!("{}.bak", display(&path)));
-        let bak1 = PathBuf::from(format!("{}.bak1", display(&path)));
+        let entries = state.backup_store.lock().unwrap().entries().unwrap();
+        let bak = entries.keys().find(|p| display(p).ends_with(".bak")).unwrap();
+        let bak1 = entries.keys().find(|p| display(p).ends_with(".bak1")).unwrap();
         assert_eq!(fs::read_to_string(&bak).unwrap(), "<weapon>v3</weapon>");
         assert_eq!(fs::read_to_string(&bak1).unwrap(), "<weapon>v2</weapon>");
         assert!(!PathBuf::from(format!("{}.bak2", display(&path))).exists());
@@ -945,7 +971,44 @@ mod tests {
         let leftover_temp = fs::read_dir(parent).unwrap().filter_map(Result::ok)
             .any(|e| e.file_name().to_string_lossy().starts_with(&format!(".{unique}.weapon.")) && e.file_name().to_string_lossy().ends_with(".tmp"));
         assert!(!leftover_temp, "临时文件未被清理");
-        let _ = fs::remove_file(&path); let _ = fs::remove_file(&bak); let _ = fs::remove_file(&bak1);
+        let _ = fs::remove_file(&path); let _ = fs::remove_dir_all(backup_dir);
+    }
+
+    #[test]
+    fn disabled_save_and_restore_never_create_or_rotate_backups() {
+        let unique = format!("rwr-disabled-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let root = std::env::temp_dir().join(unique); fs::create_dir(&root).unwrap();
+        let source = root.join("test.weapon"); fs::write(&source, "v0").unwrap();
+        let state = AppState::default();
+        {
+            let mut store = state.backup_store.lock().unwrap();
+            store.settings.directory = display(&root.join("central")); store.settings.enabled = false;
+        }
+        state.writable_weapons.lock().unwrap().insert(source.canonicalize().unwrap());
+        assert!(save_weapon_impl(display(&source), "v1".into(), &state).unwrap().backup_path.is_none());
+        assert!(!root.join("central").exists()); assert!(!root.join("test.weapon.bak").exists());
+        state.backup_store.lock().unwrap().settings.enabled = true;
+        let saved = save_weapon_impl(display(&source), "v2".into(), &state).unwrap();
+        let backup = saved.backup_path.unwrap();
+        *state.managed_backups.lock().unwrap() = state.backup_store.lock().unwrap().entries().unwrap().into_iter().collect();
+        state.backup_store.lock().unwrap().settings.enabled = false;
+        restore_backup_impl(backup.clone(), &state).unwrap();
+        assert_eq!(fs::read_to_string(&source).unwrap(), "v1");
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "v1");
+        assert_eq!(state.backup_store.lock().unwrap().entries().unwrap().len(), 1);
+        // Restoring a legacy sidecar must also obey the disabled switch.
+        let legacy = root.join("test.weapon.bak"); fs::write(&legacy, "legacy").unwrap();
+        state.managed_backups.lock().unwrap().insert(legacy.canonicalize().unwrap(), source.canonicalize().unwrap());
+        restore_backup_impl(display(&legacy), &state).unwrap();
+        assert_eq!(fs::read_to_string(&source).unwrap(), "legacy");
+        assert_eq!(fs::read_to_string(&legacy).unwrap(), "legacy");
+        assert!(!root.join("test.weapon.bak1").exists());
+        state.backup_store.lock().unwrap().settings.enabled = true;
+        restore_backup_impl(backup.clone(), &state).unwrap();
+        assert_eq!(fs::read_to_string(&source).unwrap(), "v1");
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "legacy");
+        assert_eq!(state.backup_store.lock().unwrap().entries().unwrap().len(), 2);
+        fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -963,10 +1026,16 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(AppState::default())
+        .setup(|app| {
+            let settings_path = app.path().app_config_dir()?.join("backup-settings.json");
+            *app.state::<AppState>().backup_store.lock().map_err(|_| std::io::Error::other("备份设置不可用"))? =
+                BackupStore::load(settings_path).map_err(std::io::Error::other)?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![open_vehicle, open_vehicle_path, resolve_vehicle_base, choose_vehicle_base, choose_vehicle_workspace, scan_vehicle_workspace, scan_vehicle_schema, list_workspace_dir,
             choose_folder, scan_map_workspace, choose_map_output_folder, authorize_map_output_root, save_map_override, choose_override_file, choose_support_file,
             scan_resource_folder, read_text_path, read_builtin_support, read_binary_base64, directory_exists, save_render_png, save_vehicle, register_vehicle_session, register_weapon_session, save_weapon,
-            list_backups, read_backup, restore_backup, delete_backups])
+            list_backups, read_backup, restore_backup, delete_backups, get_backup_settings, configure_backups, open_backup_directory])
         .run(tauri::generate_context!())
         .expect("RWR Vehicle Studio failed to start");
 }
