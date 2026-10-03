@@ -33,6 +33,7 @@ import { flattenWorkspace, loadWorkspacePreferences, saveWorkspacePreferences, r
 import { createDirtyComputed, createEditorRevisions } from './core/editor/revision-state';
 import { insertVehicleTab, vehiclePathKey, vehicleTabDirty, type VehicleTab } from './core/editor/vehicle-tabs';
 import type { CrewGuideKind } from './editor/scene-controller';
+import { formatVehicleSceneSummary, vehicleSceneSummary } from './core/vehicle/scene-summary';
 
 const preferences = loadResourcePreferences();
 const hasRememberedResources = ref(preferences.lastSelection !== undefined);
@@ -486,7 +487,7 @@ async function resourcesApplied(selection: ResourceSelection, token = ++vehicleL
   resourceDialog.value = false; if (resourceChanged) invalidateSoldierAssets(); const soldierLoaded = await loadSoldier(token); if (token !== vehicleLoadToken) return; if (!soldierLoaded) { resourceDialog.value = true; return; } await validate(); if (token !== vehicleLoadToken) return; if (resourceChanged) resourceGeneration.value++; markSceneChanged(); for (const session of weaponSessions.values()) { try { await desktop.registerWeaponSession(session.path); } catch { /* 文件可能已在会话期间被移动或删除 */ } } await loadSelectedWeaponEditor();
   if (token !== vehicleLoadToken) return;
   const diagnostics = catalog.scanDiagnostics; const total = diagnostics.duplicates.length + diagnostics.warnings.length;
-  status.value = `已载入：${entries.value.filter((e) => e.kind === 'visual').length} 个外观，${entries.value.filter((e) => e.kind === 'slot').length} 个乘员位${total ? `；资源扫描发现 ${total} 个问题` : ''}`;
+  status.value = total ? `资源扫描发现 ${total} 个问题` : '';
 }
 async function loadSoldier(token = ++vehicleLoadToken): Promise<boolean> {
   if (!supportModel.value || !supportAnimations.value) {
@@ -840,6 +841,17 @@ async function backupRestored(result: BackupRestoreResult) {
 }
 watch(selectedWeaponKey, () => { void loadSelectedWeaponEditor(); });
 watch(documentRevision, () => { if (!restoringVehicleTab && dirty.value) retainVehicleTab(); }, { flush: 'sync' });
+const sceneSummary = ref('');
+let sceneSummaryToken = 0;
+watch([previewDocument, sceneRevision, resourceGeneration], async () => {
+  const token = ++sceneSummaryToken;
+  const doc = previewDocument.value;
+  if (!doc) { sceneSummary.value = ''; return; }
+  try {
+    const summary = await vehicleSceneSummary(doc, catalog);
+    if (token === sceneSummaryToken) sceneSummary.value = formatVehicleSceneSummary(summary);
+  } catch { if (token === sceneSummaryToken) sceneSummary.value = ''; }
+}, { immediate: true });
 let unlistenClose: UnlistenFn | undefined;
 let exiting = false;
 let closeRequestPending = false;
@@ -904,7 +916,7 @@ onBeforeUnmount(() => {
 <template>
   <main class="app-shell">
     <header class="topbar">
-      <div class="brand"><strong>RWR VEHICLE STUDIO</strong><small>0.81</small></div>
+      <div class="brand"><strong>RWR VEHICLE STUDIO</strong><small>0.91</small></div>
       <nav>
         <span class="mode-tabs"><button :class="{ active: activeMode === 'editor' }" @click="activeMode = 'editor'">VEHICLE 编辑器</button><button :class="{ active: activeMode === 'render' }" @click="activeMode = 'render'">ICON 渲染</button><button :class="{ active: activeMode === 'map' }" @click="activeMode = 'map'">MAP 对象</button></span><span class="divider"></span>
         <template v-if="activeMode !== 'map'"><button @click="openVehicle">打开载具</button><button @click="resourceDialog = true">资源文件夹</button><button @click="overrideDialog = true">文件覆盖</button><button @click="backupDialog = true">管理备份</button></template>
@@ -1070,7 +1082,7 @@ onBeforeUnmount(() => {
     <IconRenderer v-if="activeMode === 'render'" :document="previewDocument" :catalog="catalog" :revision="sceneRevision" :resource-generation="resourceGeneration" :vehicle-key="opened?.path" :vehicle-name="opened?.name" />
     <MapObjectEditor v-if="activeMode === 'map'" @dirty-change="mapDirty = $event" />
 
-    <footer v-if="activeMode !== 'map'" class="statusbar"><span>{{ status }}</span><span class="ellipsis">{{ opened?.path ?? '' }}</span></footer>
+    <footer v-if="activeMode !== 'map'" class="statusbar"><span><template v-if="sceneSummary">{{ sceneSummary }}<template v-if="status"> · </template></template>{{ status }}</span><span class="ellipsis">{{ opened?.path ?? '' }}</span></footer>
     <Transition name="modal" appear><ResourceDialog v-if="resourceDialog" :catalog="catalog" :support-model="supportModel" :support-animations="supportAnimations" @close="resourceDialog = false" @apply="resourcesApplied" /></Transition>
     <Transition name="modal" appear><OverrideDialog v-if="overrideDialog" :catalog="catalog" @close="overrideDialog = false" @changed="overrideChanged" /></Transition>
     <Transition name="modal" appear><BackupManagerDialog v-if="backupDialog" :roots="backupRoots" @close="backupDialog = false" @restored="backupRestored" @settings-changed="backupSettingsChanged" /></Transition>

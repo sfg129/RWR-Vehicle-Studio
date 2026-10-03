@@ -42,7 +42,6 @@ defineExpose({ reset: () => controller?.resetCamera(), top: () => controller?.to
 </script>
 <template>
   <div ref="host" class="viewport-host" :class="{ 'is-fading': fading }">
-    <div class="viewport-help"><span>拖动箭头修改位置</span><span>单击模型选择</span><span>左键旋转</span><span>右键平移</span><span>滚轮缩放</span></div>
     <div class="fps-badge" :class="{ slow: fps > 0 && fps < 25 }">{{ fps || '—' }} FPS · {{ dynamicOccupants }} 动态乘员</div>
     <div class="view-buttons"><button class="small" @click="controller?.resetCamera()">透视</button><button class="small" @click="controller?.topView()">顶视</button><button class="small" @click="controller?.sideView()">侧视</button></div>
   </div>
