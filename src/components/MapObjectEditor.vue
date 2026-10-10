@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { localized } from '../i18n/runtime';
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { desktop, type MapWorkspaceEntry, type VehicleWorkspaceEntry } from '../platform/desktop-api';
 import { cloneMapSpawn, mapSpawnSnapshot, parseRwrMap, serializeRwrMap, type MapVehicleSpawn, type ParsedRwrMap } from '../core/map/rwr-map-document';
@@ -63,7 +64,7 @@ function savePreset(asNew: boolean): void {
 }
 function removePreset(): void {
   const preset = selectedPreset.value;
-  if (!preset || !confirm(`删除预设“${preset.name}”？`)) return;
+  if (!preset || !ask(`删除预设“${preset.name}”？`)) return;
   presets.value = presets.value.filter((item) => item.id !== preset.id); activePresetId.value = ''; presetName.value = ''; persistPreferences();
 }
 function clearProject(): void {
@@ -77,7 +78,7 @@ async function selectPreset(event: Event): Promise<void> {
   const input = event.target as HTMLSelectElement;
   const preset = presets.value.find((item) => item.id === input.value);
   if (!preset || busy.value) return;
-  if (dirty.value && !confirm('当前地图有未保存修改，仍要切换预设吗？')) { input.value = activePresetId.value; return; }
+  if (dirty.value && !ask('当前地图有未保存修改，仍要切换预设吗？')) { input.value = activePresetId.value; return; }
   busy.value = true; clearProject(); outputAuthorized.value = false;
   try {
     Object.assign(settings, normalizeMapSettings(preset.settings)); activePresetId.value = preset.id; presetName.value = preset.name;
@@ -87,7 +88,7 @@ async function selectPreset(event: Event): Promise<void> {
 }
 async function changeSourceFolder(value: string): Promise<void> {
   if (value === settings.sourceMapsFolder) return;
-  if (dirty.value && !confirm('当前地图有未保存修改，仍要更换地图目录吗？')) return;
+  if (dirty.value && !ask('当前地图有未保存修改，仍要更换地图目录吗？')) return;
   busy.value = true; clearProject(); settings.sourceMapsFolder = value; settings.selectedMap = '';
   try { await scanSourceMaps(); } finally { busy.value = false; }
 }
@@ -128,7 +129,7 @@ async function loadBackground(folder: string): Promise<void> {
   try { const bytes = await desktop.readBinary(join(folder, 'map.png')); imageUrl.value = URL.createObjectURL(new Blob([bytes], { type: 'image/png' })); } catch { catalogWarnings.value.push('未找到背景 map.png。'); }
 }
 async function loadProject(mapName = settings.selectedMap): Promise<void> {
-  if (!mapName) { status.value = '请先从地图工作区选择一张地图。'; return; } if (dirty.value && !confirm('当前地图有未保存修改，仍要切换地图吗？')) return;
+  if (!mapName) { status.value = '请先从地图工作区选择一张地图。'; return; } if (dirty.value && !ask('当前地图有未保存修改，仍要切换地图吗？')) return;
   const entry = mapEntries.value.find((item) => item.name === mapName); if (!entry) { status.value = `地图 ${mapName} 已不在原版 maps 工作区中，请刷新列表。`; return; }
   busy.value = true; status.value = `正在载入 ${mapName}…`;
   try { const targetFolder = join(settings.outputMapsFolder, mapName); let path = join(targetFolder, 'objects.svg'); let source: string; try { source = await desktop.readText(path); } catch { path = join(entry.path, 'objects.svg'); source = await desktop.readText(path); }
@@ -145,14 +146,14 @@ function recordUndo(): void { undoStack.value = [...undoStack.value.slice(-79), 
 function markChanged(): void { revision.value++; }
 function undo(): void { const previous = undoStack.value.at(-1); if (!previous) return; spawns.value = previous; undoStack.value = undoStack.value.slice(0, -1); revision.value++; if (!selected.value) selectedUid.value = spawns.value.find((spawn) => !spawn.deleted && !spawn.isTemplate)?.uid ?? ''; status.value = '已撤销地图对象修改'; }
 function duplicateSelected(): void { const spawn = selected.value; if (!spawn) return; recordUndo(); const cloned = cloneMapSpawn(spawn, spawns.value); spawns.value = [...spawns.value, cloned]; selectedUid.value = cloned.uid; markChanged(); status.value = '已复制刷新点；新对象略向右下偏移'; }
-function deleteSelected(): void { const spawn = selected.value; if (!spawn || !confirm(`删除刷新点 ${spawn.reference || spawn.elementId}？`)) return; recordUndo(); spawn.deleted = true; markChanged(); selectedUid.value = spawns.value.find((item) => !item.deleted && !item.isTemplate)?.uid ?? ''; status.value = '已标记删除；保存后写入 objects.svg'; }
+function deleteSelected(): void { const spawn = selected.value; if (!spawn || !ask(`删除刷新点 ${spawn.reference || spawn.elementId}？`)) return; recordUndo(); spawn.deleted = true; markChanged(); selectedUid.value = spawns.value.find((item) => !item.deleted && !item.isTemplate)?.uid ?? ''; status.value = '已标记删除；保存后写入 objects.svg'; }
 function beginFieldEdit(): void { recordUndo(); } function fieldChanged(): void { markChanged(); }
 
 async function authorizeAndSave(): Promise<void> {
   if (!map.value || !settings.selectedMap || busy.value) return;
   if (!outputAuthorized.value) { try { settings.outputMapsFolder = await desktop.authorizeMapOutputRoot(settings.outputMapsFolder); outputAuthorized.value = true; } catch { const chosen = await desktop.chooseMapOutputFolder(settings.outputMapsFolder); if (!chosen) { status.value = '已取消保存：未选择模组 maps 根目录'; return; } settings.outputMapsFolder = chosen; outputAuthorized.value = true; } }
   busy.value = true;
-  try { if (loadedPath.value.toLocaleLowerCase() === outputPath.value.toLocaleLowerCase()) { try { const disk = await desktop.readText(outputPath.value); if (disk !== savedSource.value && !confirm('模组 objects.svg 已被其它程序修改，仍要覆盖吗？')) return; } catch { /* removed: save as new */ } }
+  try { if (loadedPath.value.toLocaleLowerCase() === outputPath.value.toLocaleLowerCase()) { try { const disk = await desktop.readText(outputPath.value); if (disk !== savedSource.value && !ask('模组 objects.svg 已被其它程序修改，仍要覆盖吗？')) return; } catch { /* removed: save as new */ } }
     const text = serializeRwrMap(map.value, spawns.value); const result = await desktop.saveMapOverride(settings.outputMapsFolder, settings.selectedMap, text); const parsed = parseRwrMap(text); map.value = parsed; spawns.value = mapSpawnSnapshot(parsed.spawns); savedSource.value = text; loadedPath.value = result.path; undoStack.value = []; revision.value++; savedRevision.value = revision.value; status.value = `已保存 ${result.path}`;
   } catch (error) { status.value = `保存失败：${errorMessage(error)}`; } finally { busy.value = false; }
 }
@@ -227,6 +228,7 @@ watch(svgElement, (element) => {
 }, { flush: 'post' });
 onMounted(() => { window.addEventListener('keydown', keydown); window.addEventListener('blur', finishPointer); void restoreWorkspace(); });
 onBeforeUnmount(() => { window.removeEventListener('keydown', keydown); window.removeEventListener('blur', finishPointer); canvasObserver?.disconnect(); persistPreferences(); if (imageUrl.value) URL.revokeObjectURL(imageUrl.value); if (pointerFrame) cancelAnimationFrame(pointerFrame); if (wheelFrame) cancelAnimationFrame(wheelFrame); window.clearTimeout(interactionTimer); });
+function ask(source: string): boolean { return window.confirm(localized(source)); }
 </script>
 
 <template>

@@ -1,0 +1,8 @@
+Use case: logo-brand
+Asset type: Windows desktop app icon for RWR Vehicle Studio
+Primary request: an ABSTRACT black-and-white industrial modeling-studio mark, not a tank or recognizable vehicle.
+Subject: one unified geometric symbol made from two interlocking isometric planes and one open cubic frame, with balanced negative space suggesting assembly and spatial editing.
+Composition: centered on a black rounded-square tile, generous safe margins; large strong silhouette readable at 16 and 32 pixels.
+Style: precise and restrained, broad white geometric faces and clean generous gaps, flat fills.
+Constraints: black and white only; no vehicles, weapons, wheels, text, letters, gradients, shadows, glow, textures, thin wireframes, decorative nodes or arrows; single square icon, not a mockup. Transparent outside the black tile.
+Generated using the built-in image generation tool.

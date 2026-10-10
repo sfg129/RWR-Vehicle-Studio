@@ -208,7 +208,7 @@ export class SourceDocument {
         i = end + 1; continue;
       }
       const end = scanTagEnd(this.source, start);
-      if (end < start) throw new Error('XML 起始标签未闭合');
+      if (end < start) { this.structuralErrors.push('XML 起始标签未闭合'); break; }
       const inner = this.source.slice(start + 1, end);
       if (inner.startsWith('/')) {
         const closingName = inner.slice(1).trim().split(/\s+/)[0] ?? '';

@@ -32,18 +32,18 @@ export type IconPartOffsets = Record<string, Vec3>;
 
 export const DEFAULT_ICON_RENDER_SETTINGS: IconRenderSettings = {
   framingMode: 'body',
-  cameraAzimuth: -40,
-  cameraElevation: 55,
-  cameraFov: 90,
+  cameraAzimuth: -30,
+  cameraElevation: 25,
+  cameraFov: 60,
   vehicleYaw: 0,
   turretYaw: 0,
-  lightAzimuth: -35,
-  lightElevation: 60,
-  ambient: 0.04,
-  threshold: 0.52,
-  padding: 0.04,
+  lightAzimuth: 76,
+  lightElevation: 31,
+  ambient: 0.33,
+  threshold: 0.22,
+  padding: 0,
   outputSize: 512,
-  background: '#181818',
+  background: '#000000',
 };
 
 const STORAGE_KEY = 'rwr-vehicle-studio.icon-render-presets.v1';

@@ -254,6 +254,10 @@ export class SceneController {
     const basisRotation = editableBasisRotation(this.doc, node, target.attr);
     this.drag = { kind: 'position', node: target.node, attr: target.attr, value: target.value, start: world.clone(), basisRotation };
   }
+  setTheme(theme: 'dark' | 'light'): void {
+    const color = theme === 'light' ? 0xe9edf1 : 0x0d1115;
+    this.scene.background = new THREE.Color(color); this.scene.fog = new THREE.Fog(color, 80, 250);
+  }
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;

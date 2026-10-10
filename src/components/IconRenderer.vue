@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { localized } from '../i18n/runtime';
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import type { ResourceCatalog } from '../core/resources/resource-catalog';
 import type { SourceDocument } from '../core/xml/source-document';
@@ -142,7 +143,7 @@ function loadPreset(): void {
 
 function removePreset(): void {
   const preset = selectedPreset.value;
-  if (!preset || !confirm(`删除渲染预设“${preset.name}”？`)) return;
+  if (!preset || !ask(`删除渲染预设“${preset.name}”？`)) return;
   presets.value = presets.value.filter((item) => item.id !== preset.id);
   selectedPresetId.value = '';
   presetName.value = '';
@@ -191,6 +192,7 @@ function safeStem(name: string): string {
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+function ask(source: string): boolean { return window.confirm(localized(source)); }
 </script>
 
 <template>
@@ -228,7 +230,7 @@ function message(error: unknown): string {
 
       <section class="icon-settings-group icon-preset-box">
         <header><b>参数预设</b><button class="tiny" @click="resetSettings">恢复默认</button></header>
-        <div class="icon-preset-row"><select v-model="selectedPresetId" @change="presetName = selectedPreset?.name ?? ''"><option value="">选择预设</option><option v-for="preset in presets" :key="preset.id" :value="preset.id">{{ preset.name }}</option></select><button :disabled="!selectedPreset" @click="loadPreset">读取</button><button :disabled="!selectedPreset" @click="removePreset">删除</button></div>
+        <div class="icon-preset-row"><select v-model="selectedPresetId" @change="loadPreset"><option value="">选择预设</option><option v-for="preset in presets" :key="preset.id" :value="preset.id">{{ preset.name }}</option></select><button :disabled="!selectedPreset" @click="removePreset">删除</button></div>
         <div class="icon-preset-row"><input v-model="presetName" placeholder="预设名称；同名覆盖" /><button class="primary" @click="savePreset">保存</button></div>
       </section>
 

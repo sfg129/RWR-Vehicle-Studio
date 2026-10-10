@@ -22,6 +22,11 @@ function decodeBase64(base64: string): ArrayBuffer {
 }
 
 export const desktop = {
+  loadSession: () => invoke<string | null>('load_session'),
+  saveSession: (text: string) => invoke<void>('save_session', { text }),
+  systemLocale: () => invoke<string>('system_locale'),
+  openRepository: () => invoke<void>('open_repository'),
+  revealFile: (path: string) => invoke<void>('reveal_file', { path }),
   openVehicle: () => invoke<OpenedFile | null>('open_vehicle'),
   openVehiclePath: (path: string) => invoke<OpenedFile>('open_vehicle_path', { path }),
   resolveVehicleBase: (path: string, reference: string) => invoke<OpenedFile | null>('resolve_vehicle_base', { path, reference }),

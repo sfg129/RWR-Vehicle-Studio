@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { SourceDocument } from '../src/core/xml/source-document';
-import { insertVehicleTab, vehiclePathKey, vehicleTabDirty, type VehicleTab, type VehicleTabDocument } from '../src/core/editor/vehicle-tabs';
+import { insertVehicleTab, relativeVehiclePath, vehiclePathKey, vehicleTabDirty, type VehicleTab, type VehicleTabDocument } from '../src/core/editor/vehicle-tabs';
 
 function state(name: string): VehicleTabDocument {
   const text = `<vehicle name="${name}"/>`;
@@ -43,5 +43,10 @@ describe('vehicle preview tabs', () => {
   it('normalizes Windows local and UNC display paths', () => {
     expect(vehiclePathKey('C:\\Mod\\A.vehicle')).toBe('c:/mod/a.vehicle');
     expect(vehiclePathKey('\\\\?\\UNC\\server\\share\\A.vehicle')).toBe('//server/share/a.vehicle');
+  });
+  it('copies relative paths without losing case or UNC path components', () => {
+    expect(relativeVehiclePath('\\\\?\\C:\\Mod\\Vehicles\\Sherman.vehicle', 'c:/mod')).toBe('Vehicles/Sherman.vehicle');
+    expect(relativeVehiclePath('\\\\?\\UNC\\Server\\Share\\Mod\\Sherman.vehicle', '//server/share/Mod')).toBe('Sherman.vehicle');
+    expect(relativeVehiclePath('C:/mods-other/A.vehicle', 'C:/mods')).toBe('C:/mods-other/A.vehicle');
   });
 });

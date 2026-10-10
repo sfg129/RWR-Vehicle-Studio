@@ -90,7 +90,7 @@ where F: FnOnce(Box<dyn FnOnce(Option<FilePath>) + Send>)
 #[tauri::command]
 async fn open_vehicle(app: AppHandle, state: State<'_, AppState>) -> Result<Option<OpenedFile>, String> {
     let picked = receive_file(|done| {
-        app.dialog().file().add_filter("RWR 载具", &["vehicle", "xml"]).pick_file(done);
+        app.dialog().file().pick_file(done);
     }).await?;
     let Some(picked) = picked else { return Ok(None) };
     let path = local_path(picked)?;
@@ -144,9 +144,6 @@ async fn choose_vehicle_base(app: AppHandle) -> Result<Option<OpenedFile>, Strin
 #[tauri::command]
 fn open_vehicle_path(state: State<'_, AppState>, path: String) -> Result<OpenedFile, String> {
     let path = canonical_read_path(Path::new(&path))?;
-    if !is_vehicle_file(&path) {
-        return Err("所选项目不是 .vehicle / .xml 载具文件".into());
-    }
     read_opened_vehicle(path, &state)
 }
 
@@ -543,7 +540,7 @@ async fn save_vehicle(app: AppHandle, state: State<'_, AppState>, path: String, 
     let target = if save_as {
         let default_name = Path::new(&path).file_name().and_then(|v| v.to_str()).unwrap_or("edited.vehicle").to_string();
         let (tx, mut rx) = tauri::async_runtime::channel(1);
-        app.dialog().file().add_filter("RWR 载具", &["vehicle", "xml"]).set_file_name(&default_name)
+        app.dialog().file().set_file_name(&default_name)
             .save_file(move |picked| { let _ = tx.try_send(picked); });
         let Some(picked) = rx.recv().await.ok_or_else(|| "保存窗口意外关闭".to_string())? else { return Ok(None) };
         local_path(picked)?
@@ -554,7 +551,7 @@ async fn save_vehicle(app: AppHandle, state: State<'_, AppState>, path: String, 
         }
         requested
     };
-    let target = normalize_vehicle_save_path(target)?;
+    let target = if save_as { normalize_vehicle_save_path(target)? } else { target };
     if save_as {
         if let Ok(canonical) = target.canonicalize() {
             if protected_paths.unwrap_or_default().iter().any(|path| Path::new(path).canonicalize().is_ok_and(|other| other == canonical)) {
@@ -585,9 +582,7 @@ fn save_weapon_impl(path: String, text: String, state: &AppState) -> Result<Save
 #[tauri::command]
 fn register_vehicle_session(path: String, state: State<'_, AppState>) -> Result<(), String> {
     let canonical = canonical_read_path(Path::new(&path))?;
-    if !is_vehicle_file(&canonical) {
-        return Err("拒绝注册：目标不是现有的 .vehicle / .xml 载具文件".into())
-    }
+    if !canonical.is_file() { return Err("目标不是文件".into()) }
     state.writable.lock().map_err(|_| "载具写入权限状态不可用")?.insert(canonical);
     Ok(())
 }
@@ -769,12 +764,75 @@ fn normalize_vehicle_save_path(mut path: PathBuf) -> Result<PathBuf, String> {
             path.set_extension("vehicle");
             Ok(path)
         }
-        Some(ext) if ext.eq_ignore_ascii_case("vehicle") || ext.eq_ignore_ascii_case("xml") => Ok(path),
-        Some(_) => Err("载具只能另存为 .vehicle 或 .xml 文件".into()),
+        Some(_) => Ok(path),
     }
 }
 fn display(p: &Path) -> String { p.to_string_lossy().into_owned() }
 fn file_name(p: &Path) -> String { p.file_name().and_then(|v| v.to_str()).unwrap_or("unnamed").to_string() }
+
+#[tauri::command]
+fn system_locale() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" { fn GetUserDefaultLocaleName(buffer: *mut u16, length: i32) -> i32; }
+        let mut buffer = [0u16; 85];
+        let length = unsafe { GetUserDefaultLocaleName(buffer.as_mut_ptr(), 85) };
+        if length > 1 { return String::from_utf16_lossy(&buffer[..length as usize - 1]); }
+    }
+    std::env::var("LC_ALL").or_else(|_| std::env::var("LC_MESSAGES")).or_else(|_| std::env::var("LANG"))
+        .unwrap_or_default().split('.').next().unwrap_or_default().replace('_', "-")
+}
+
+#[tauri::command]
+fn reveal_file(path: String) -> Result<(), String> {
+    let canonical = canonical_read_path(Path::new(&path))?;
+    if !canonical.is_file() { return Err("目标不是文件".into()) }
+    #[cfg(target_os = "windows")]
+    {
+        let value = display(&canonical);
+        let value = if let Some(unc) = value.strip_prefix("\\\\?\\UNC\\") { format!("\\\\{unc}") } else { value.strip_prefix("\\\\?\\").unwrap_or(&value).to_string() };
+        std::process::Command::new("explorer.exe").arg(format!("/select,{value}")).spawn().map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    { std::process::Command::new("open").arg("-R").arg(&canonical).spawn().map_err(|e| e.to_string())?; }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    { std::process::Command::new("xdg-open").arg(canonical.parent().ok_or("没有父目录")?).spawn().map_err(|e| e.to_string())?; }
+    Ok(())
+}
+
+#[tauri::command]
+fn open_repository() -> Result<(), String> {
+    const URL: &str = "https://github.com/sfg129/RWR-Vehicle-Studio";
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("rundll32.exe");
+        command.arg("url.dll,FileProtocolHandler");
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(URL).spawn().map_err(|e| format!("无法打开仓库：{e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_session(app: AppHandle) -> Result<Option<String>, String> {
+    let path = app.path().app_config_dir().map_err(|e| e.to_string())?.join("editor-session.json");
+    if !path.exists() { return Ok(None); }
+    fs::read_to_string(path).map(Some).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_session(text: String, app: AppHandle) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    if value["version"] != 1 || !value["tabs"].is_array() || !value["weapons"].is_array() { return Err("Invalid session".into()); }
+    let directory = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    atomic_write(&directory.join("editor-session.json"), text.as_bytes())
+}
 
 #[cfg(test)]
 mod tests {
@@ -942,6 +1000,7 @@ mod tests {
         let state = AppState::default();
         let backup_dir = std::env::temp_dir().join(format!("{unique}-backups"));
         state.backup_store.lock().unwrap().settings.directory = display(&backup_dir);
+        state.backup_store.lock().unwrap().settings.enabled = true;
         state.writable_weapons.lock().unwrap().insert(path.canonicalize().unwrap());
         let saved = save_weapon_impl(display(&path), "<weapon><shield offset=\"1 2 3\" extent=\"4 5 6\"/></weapon>".into(), &state).unwrap();
         let backup = PathBuf::from(saved.backup_path.as_ref().unwrap());
@@ -958,6 +1017,7 @@ mod tests {
         let state = AppState::default();
         let backup_dir = std::env::temp_dir().join(format!("{unique}-backups"));
         state.backup_store.lock().unwrap().settings.directory = display(&backup_dir);
+        state.backup_store.lock().unwrap().settings.enabled = true;
         state.writable_weapons.lock().unwrap().insert(path.canonicalize().unwrap());
         for v in 1..=4 { save_weapon_impl(display(&path), format!("<weapon>v{v}</weapon>"), &state).unwrap(); }
         assert_eq!(fs::read_to_string(&path).unwrap(), "<weapon>v4</weapon>");
@@ -1032,7 +1092,7 @@ pub fn run() {
                 BackupStore::load(settings_path).map_err(std::io::Error::other)?;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![open_vehicle, open_vehicle_path, resolve_vehicle_base, choose_vehicle_base, choose_vehicle_workspace, scan_vehicle_workspace, scan_vehicle_schema, list_workspace_dir,
+        .invoke_handler(tauri::generate_handler![load_session, save_session, system_locale, reveal_file, open_repository, open_vehicle, open_vehicle_path, resolve_vehicle_base, choose_vehicle_base, choose_vehicle_workspace, scan_vehicle_workspace, scan_vehicle_schema, list_workspace_dir,
             choose_folder, scan_map_workspace, choose_map_output_folder, authorize_map_output_root, save_map_override, choose_override_file, choose_support_file,
             scan_resource_folder, read_text_path, read_builtin_support, read_binary_base64, directory_exists, save_render_png, save_vehicle, register_vehicle_session, register_weapon_session, save_weapon,
             list_backups, read_backup, restore_backup, delete_backups, get_backup_settings, configure_backups, open_backup_directory])

@@ -11,7 +11,7 @@ impl Default for BackupStore {
     fn default() -> Self {
         let directory = std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.join("bak")))
             .unwrap_or_else(|| PathBuf::from("bak")).to_string_lossy().into_owned();
-        Self { settings: BackupSettings { enabled: true, default_directory: directory.clone(), directory }, preferences: None }
+        Self { settings: BackupSettings { enabled: false, default_directory: directory.clone(), directory }, preferences: None }
     }
 }
 
@@ -83,7 +83,7 @@ impl BackupStore {
             let Ok(bytes) = fs::read(bucket.join("source.json")) else { continue; };
             let Ok(source) = serde_json::from_slice::<String>(&bytes) else { continue; };
             let source = PathBuf::from(source);
-            if !source.is_absolute() || !source.extension().and_then(|v| v.to_str()).is_some_and(|v| ["vehicle", "weapon", "xml"].iter().any(|ext| v.eq_ignore_ascii_case(ext))) { continue; }
+            if !source.is_absolute() { continue; }
             let Some(name) = source.file_name() else { continue; };
             for suffix in [".bak", ".bak1"] {
                 let backup = bucket.join(format!("{}{suffix}", name.to_string_lossy()));
@@ -120,6 +120,10 @@ mod tests {
         assert_eq!(store.entries().unwrap().len(), 2);
         assert!(!root.join("a/tank.vehicle.bak").exists());
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn backups_are_off_by_default() {
+        assert!(!BackupStore::default().settings.enabled);
     }
     #[test]
     fn settings_persist_and_do_not_create_backup_directory() {

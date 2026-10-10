@@ -4,6 +4,7 @@ import { SceneController, type CrewGuideKind, type ViewOptions } from '../editor
 import type { SourceDocument, SourceNode } from '../core/xml/source-document';
 import type { ResourceCatalog } from '../core/resources/resource-catalog';
 import type { SoldierAssets } from '../core/soldier/soldier-assets';
+import { studioSettings } from '../core/editor/studio-settings';
 
 const props = defineProps<{ document?: SourceDocument; catalog: ResourceCatalog; soldier?: SoldierAssets; options: ViewOptions; selectedId?: number; selectedEntrance?: CrewGuideKind; selectedTurretPivot?: boolean; turretPreviewDegrees?: number; revision: number; vehicleKey?: string; resourceGeneration?: number; editingEnabled?: boolean }>();
 const emit = defineEmits<{ select: [number, CrewGuideKind?]; move: [SourceNode, string, [number, number, number], boolean]; pivotMove: [SourceNode, [number, number, number]]; rotate: [SourceNode, 'rotation' | 'exit_rotation', number]; diagnostic: [string] }>();
@@ -12,7 +13,7 @@ let controller: SceneController | undefined; let lastVehicleKey: string | undefi
 onMounted(() => { controller = new SceneController(host.value!, (id, entrance) => emit('select', id, entrance), (node, attr, value, needsRebuild) => emit('move', node, attr, value, needsRebuild),
   (node, value) => emit('pivotMove', node, value),
   (node, attr, value) => emit('rotate', node, attr, value),
-  (value, dynamic) => { fps.value = value; dynamicOccupants.value = dynamic; }, (message) => emit('diagnostic', message)); refresh(); });
+  (value, dynamic) => { fps.value = value; dynamicOccupants.value = dynamic; }, (message) => emit('diagnostic', message)); controller.setTheme(studioSettings.theme); refresh(); });
 onBeforeUnmount(() => { controller?.dispose(); controller = undefined; });
 async function refresh() {
   if (!controller || !props.document) return;
@@ -34,6 +35,7 @@ function scheduleRefresh() {
 }
 watch(() => [props.revision, props.soldier, props.options.showBroken, props.options.showOccupants, props.options.showOccupantPositions, props.options.showVisualBounds, props.options.showBounds, props.options.showShields, props.options.showEntrances], scheduleRefresh);
 watch(() => props.turretPreviewDegrees, (value) => controller?.setTurretPreviewDegrees(value ?? 0));
+watch(() => studioSettings.theme, theme => controller?.setTheme(theme));
 watch(() => props.resourceGeneration, () => { controller?.invalidateAssetCaches(); scheduleRefresh(); });
 watch(() => props.editingEnabled, (enabled) => controller?.setEditingEnabled(enabled ?? true));
 watch(() => props.document, (doc) => { if (doc) controller?.updateDocument(doc); });

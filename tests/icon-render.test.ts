@@ -5,6 +5,9 @@ import { DEFAULT_ICON_RENDER_SETTINGS, normalizeIconRenderSettings } from '../sr
 import { DEFAULT_RESOURCE_SELECTION, DEFAULT_WW2_BASE_MODEL_FOLDER, setWw2BaseModelFallback } from '../src/core/resources/resource-presets';
 
 describe('独立图标渲染工作流', () => {
+  it('uses saved preset 4 as built-in defaults without adding a preset', () => {
+    expect(DEFAULT_ICON_RENDER_SETTINGS).toEqual({ framingMode: 'body', cameraAzimuth: -30, cameraElevation: 25, cameraFov: 60, vehicleYaw: 0, turretYaw: 0, lightAzimuth: 76, lightElevation: 31, ambient: 0.33, threshold: 0.22, padding: 0, outputSize: 512, background: '#000000' });
+  });
   it('只把正常 visual 与 turret weapon 暴露为可临时调整部件', () => {
     const document = new SourceDocument(`<vehicle>
       <visual class="chassis" mesh_filename="body.mesh" offset="0 0 0" />
@@ -20,7 +23,7 @@ describe('独立图标渲染工作流', () => {
   });
 
   it('对读取到的预设做边界归一化，避免无效参数破坏相机或导出', () => {
-    expect(DEFAULT_ICON_RENDER_SETTINGS.cameraFov).toBe(90);
+    expect(DEFAULT_ICON_RENDER_SETTINGS.cameraFov).toBe(60);
     expect(DEFAULT_ICON_RENDER_SETTINGS.framingMode).toBe('body');
     expect(DEFAULT_ICON_RENDER_SETTINGS.outputSize).toBe(512);
     const settings = normalizeIconRenderSettings({
@@ -36,7 +39,7 @@ describe('独立图标渲染工作流', () => {
     expect(settings.threshold).toBe(0);
     expect(settings.ambient).toBe(DEFAULT_ICON_RENDER_SETTINGS.ambient);
     expect(settings.outputSize).toBe(512);
-    expect(settings.background).toBe('#181818');
+    expect(settings.background).toBe('#000000');
     expect(normalizeIconRenderSettings({ framingMode: 'barrel' }).framingMode).toBe('barrel');
   });
 

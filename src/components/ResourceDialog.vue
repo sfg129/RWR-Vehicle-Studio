@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { localized } from '../i18n/runtime';
 import { computed, onMounted, reactive, ref } from 'vue';
 import { desktop, type ResourceKind } from '../platform/desktop-api';
 import { StaleResourceApplyError, type ResourceCatalog } from '../core/resources/resource-catalog';
@@ -70,7 +71,7 @@ function savePreset() {
   persistPresets(saved.id);
 }
 function removePreset() {
-  const preset = selectedPreset.value; if (!preset || !confirm(`删除资源预设“${preset.name}”？`)) return;
+  const preset = selectedPreset.value; if (!preset || !ask(`删除资源预设“${preset.name}”？`)) return;
   presets.value = presets.value.filter((item) => item.id !== preset.id); selectedPresetId.value = ''; presetName.value = ''; busy.value = '已删除预设';
   persistPresets('');
 }
@@ -105,10 +106,11 @@ onMounted(async () => {
   if (await desktop.directoryExists(DEFAULT_WW2_BASE_MODEL_FOLDER)) return;
   secondaryFolders.model.splice(0, secondaryFolders.model.length, ...secondaryDraft(secondaryFolders.model.filter((path) => path.toLocaleLowerCase() !== DEFAULT_WW2_BASE_MODEL_FOLDER.toLocaleLowerCase())));
 });
+function ask(source: string): boolean { return window.confirm(localized(source)); }
 </script>
 <template>
   <div class="modal-backdrop"><section class="dialog resource-dialog">
-    <header><div><small>RESOURCE WORKSPACE</small><h2>资源文件夹与人物预览</h2></div><button class="icon" :disabled="indexing" @click="$emit('close')">×</button></header>
+    <header><div><small>RESOURCE WORKSPACE</small><h2>资源文件夹</h2></div><button class="icon" :disabled="indexing" @click="$emit('close')">×</button></header>
     <fieldset class="dialog-fields" :disabled="indexing">
     <section class="preset-box">
       <strong>资源路径预设</strong>
