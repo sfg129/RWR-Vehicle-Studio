@@ -9,12 +9,14 @@ import { searchKeymap, highlightSelectionMatches, openSearchPanel } from '@codem
 import { tags } from '@lezer/highlight';
 import { changedLines, type LineChange } from '../core/editor/xml-editor';
 import { studioSettings } from '../core/editor/studio-settings';
-import { matchShortcut, shortcutDefaults, shortcutFromEvent, type StudioShortcutAction } from '../core/editor/shortcuts';
+import { matchShortcut, shortcutDefaults, secondaryShortcutDefaults, shortcutFromEvent, type StudioShortcutAction } from '../core/editor/shortcuts';
 const props = defineProps<{ text: string; savedText: string; fileId: string; name: string; readOnly: boolean }>();
 const emit = defineEmits<{ change: [text: string]; close: []; undo: []; redo: []; shortcut: [StudioShortcutAction] }>();
 const host = ref<HTMLElement>();
 let view: EditorView | undefined;
 let synchronizing = false;
+let shortcutChord = '';
+let shortcutTimer: ReturnType<typeof setTimeout> | undefined;
 const readonly = new Compartment();
 const appearance = new Compartment();
 const changes = new Compartment();
@@ -76,19 +78,22 @@ onMounted(() => {
     readonly.of(EditorState.readOnly.of(props.readOnly)), appearance.of(theme()), changes.of(differenceGutter()),
     EditorView.domEventHandlers({ keydown(event) {
       const stroke = shortcutFromEvent(event); if (!stroke) return false;
-      const action = matchShortcut(studioSettings.shortcuts, stroke).action;
+      const match = matchShortcut(studioSettings.shortcuts, stroke, shortcutChord, studioSettings.secondaryShortcuts);
+      shortcutChord = match.prefix ?? ''; clearTimeout(shortcutTimer);
+      if (match.prefix) { event.preventDefault(); event.stopPropagation(); shortcutTimer = setTimeout(() => shortcutChord = '', 2000); return true; }
+      const action = match.action;
       if (action === 'undo' || action === 'redo') {
         event.preventDefault(); event.stopPropagation();
         if (action === 'undo') emit('undo'); else emit('redo');
         return true;
       }
-      const textActions = ['copy','cut','paste','selectAll','find'];
+      const textActions = ['copy','cut','paste','selectAll','find','undo','redo'];
       if (action && textActions.includes(action)) {
         if (['copy','cut','paste'].includes(action) && stroke === shortcutDefaults[action]) return false;
         event.preventDefault(); event.stopPropagation(); void runCommand(action).catch(() => {}); return true;
       }
       if (action) { event.preventDefault(); event.stopPropagation(); emit('shortcut', action); return true; }
-      if (Object.entries(shortcutDefaults).some(([id, binding]) => textActions.includes(id) && binding === stroke && studioSettings.shortcuts[id as StudioShortcutAction] !== binding)) {
+      if ([...Object.entries(shortcutDefaults), ...Object.entries(secondaryShortcutDefaults)].some(([id, binding]) => textActions.includes(id) && binding === stroke)) {
         event.preventDefault(); event.stopPropagation(); return true;
       }
       return false;
@@ -116,7 +121,7 @@ watch(() => [props.fileId, props.text] as const, ([id, text], [previous]) => {
 watch(() => props.savedText, updateGutter);
 watch(() => props.readOnly, (value) => view?.dispatch({ effects: readonly.reconfigure(EditorState.readOnly.of(value)) }));
 watch(() => [studioSettings.theme, studioSettings.fontSize], () => view?.dispatch({ effects: appearance.reconfigure(theme()) }));
-onBeforeUnmount(() => view?.destroy());
+onBeforeUnmount(() => { clearTimeout(shortcutTimer); view?.destroy(); });
 </script>
 <template>
   <section class="xml-text-editor">

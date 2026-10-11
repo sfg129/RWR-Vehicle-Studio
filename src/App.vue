@@ -41,6 +41,7 @@ import { renderableVehicle } from './core/editor/xml-editor';
 import { localized } from './i18n/runtime';
 import { studioSettings } from './core/editor/studio-settings';
 import { matchShortcut, shortcutFromEvent, type StudioShortcutAction } from './core/editor/shortcuts';
+import { shortcutLabel } from './core/editor/shortcut-bindings';
 import { parseSession, sessionKey, type StudioSession } from './core/editor/session';
 
 const preferences = loadResourcePreferences();
@@ -831,7 +832,7 @@ function keydown(event: KeyboardEvent) {
   if (closingVehicleTabId.value) { if (event.key === 'Escape' && !saving.value) cancelClose(); return; }
   if (settingsDialog.value || resourceDialog.value || backupDialog.value || activeMode.value === 'map') return;
   const stroke = shortcutFromEvent(event); if (!stroke) return;
-  const match = matchShortcut(studioSettings.shortcuts, stroke, shortcutChord.value);
+  const match = matchShortcut(studioSettings.shortcuts, stroke, shortcutChord.value, studioSettings.secondaryShortcuts);
   shortcutChord.value = match.prefix ?? ''; clearTimeout(chordTimer);
   if (match.prefix) { event.preventDefault(); chordTimer = setTimeout(() => shortcutChord.value = '', 2000); return; }
   if (!match.action) return;
@@ -1100,19 +1101,19 @@ function ask(source: string): boolean { return window.confirm(localized(source))
         <span class="mode-tabs" data-no-localize><button :class="{ active: activeMode === 'editor' }" @click="activeMode = 'editor'">VEHICLE</button><button :class="{ active: activeMode === 'render' }" @click="activeMode = 'render'">ICON</button><button :class="{ active: activeMode === 'map' }" @click="activeMode = 'map'">MAP</button></span><span class="divider"></span>
         <div class="app-menu" @mouseenter="menu = 'file'" @mouseleave="menu = ''"><button :aria-expanded="menu === 'file'" aria-haspopup="menu" @click="menu = 'file'"><span>文件</span><span class="menu-arrow" aria-hidden="true">▾</span></button>
           <div v-if="menu === 'file'" class="menu-dropdown" role="menu" @click="menu = ''">
-            <button role="menuitem" @click="newFile"><span>新建</span><kbd data-no-localize>{{ studioSettings.shortcuts.newFile }}</kbd></button>
-            <button role="menuitem" @click="openVehicle"><span>打开</span><kbd data-no-localize>{{ studioSettings.shortcuts.open }}</kbd></button>
-            <hr /><button role="menuitem" :disabled="!document || saving" @click="save(false)"><span>保存</span><kbd data-no-localize>{{ studioSettings.shortcuts.save }}</kbd></button>
-            <button role="menuitem" :disabled="!document || saving" @click="save(true)"><span>另存为</span><kbd data-no-localize>{{ studioSettings.shortcuts.saveAs }}</kbd></button>
-            <button role="menuitem" :disabled="!document || saving" @click="reload"><span>重新载入</span><kbd data-no-localize>{{ studioSettings.shortcuts.reload }}</kbd></button>
-            <hr /><button role="menuitem" :disabled="!document || saving" @click="requestCloseVehicleTab(activeVehicleTabId)"><span>关闭</span><kbd data-no-localize>{{ studioSettings.shortcuts.close }}</kbd></button>
-            <button role="menuitem" @click="closeTabs('all')"><span>全部关闭</span><kbd data-no-localize>{{ studioSettings.shortcuts.closeAll }}</kbd></button>
+            <button role="menuitem" @click="newFile"><span>新建</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'newFile') }}</kbd></button>
+            <button role="menuitem" @click="openVehicle"><span>打开</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'open') }}</kbd></button>
+            <hr /><button role="menuitem" :disabled="!document || saving" @click="save(false)"><span>保存</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'save') }}</kbd></button>
+            <button role="menuitem" :disabled="!document || saving" @click="save(true)"><span>另存为</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'saveAs') }}</kbd></button>
+            <button role="menuitem" :disabled="!document || saving" @click="reload"><span>重新载入</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'reload') }}</kbd></button>
+            <hr /><button role="menuitem" :disabled="!document || saving" @click="requestCloseVehicleTab(activeVehicleTabId)"><span>关闭</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'close') }}</kbd></button>
+            <button role="menuitem" @click="closeTabs('all')"><span>全部关闭</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'closeAll') }}</kbd></button>
           </div>
         </div>
         <div class="app-menu" @mouseenter="menu = 'edit'" @mouseleave="menu = ''"><button :aria-expanded="menu === 'edit'" aria-haspopup="menu" @click="menu = 'edit'"><span>编辑</span><span class="menu-arrow" aria-hidden="true">▾</span></button>
           <div v-if="menu === 'edit'" class="menu-dropdown" role="menu" @click="menu = ''">
-            <button role="menuitem" :disabled="!canUndo || saving" @click="undo"><span>撤销</span><kbd data-no-localize>{{ studioSettings.shortcuts.undo }}</kbd></button>
-            <button role="menuitem" :disabled="!canRedo || saving" @click="redo"><span>重做</span><kbd data-no-localize>{{ studioSettings.shortcuts.redo }}</kbd></button>
+            <button role="menuitem" :disabled="!canUndo || saving" @click="undo"><span>撤销</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'undo') }}</kbd></button>
+            <button role="menuitem" :disabled="!canRedo || saving" @click="redo"><span>重做</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'redo') }}</kbd></button>
           </div>
         </div><span class="divider"></span>
         <button @click="resourceDialog = true">资源</button><button class="settings-button" @click="settingsDialog = true">设置</button><button v-if="backupEnabled" @click="backupDialog = true">备份</button>
@@ -1285,17 +1286,17 @@ function ask(source: string): boolean { return window.confirm(localized(source))
     <Transition name="modal" appear><StudioSettingsDialog v-if="settingsDialog" @close="settingsDialog = false" @settings-changed="backupSettingsChanged" /></Transition>
     <LanguageSelection />
     <div v-if="tabMenu" ref="tabMenuElement" class="menu-dropdown tab-context-menu" role="menu" :style="{ left: tabMenu.x + 'px', top: tabMenu.y + 'px' }" @keydown.esc="tabMenu = undefined">
-      <button role="menuitem" @click="tabAction(() => requestCloseVehicleTab(tabMenu!.id))"><span>关闭</span><kbd data-no-localize>{{ studioSettings.shortcuts.close }}</kbd></button>
+      <button role="menuitem" @click="tabAction(() => requestCloseVehicleTab(tabMenu!.id))"><span>关闭</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'close') }}</kbd></button>
       <button role="menuitem" @click="closeTabs('others', tabMenu.id)"><span>关闭其它</span></button>
       <button role="menuitem" @click="closeTabs('right', tabMenu.id)"><span>关闭右侧标签页</span></button>
-      <button role="menuitem" @click="closeTabs('saved')"><span>关闭已保存</span><kbd data-no-localize>{{ studioSettings.shortcuts.closeSaved }}</kbd></button>
-      <button role="menuitem" @click="closeTabs('all')"><span>全部关闭</span><kbd data-no-localize>{{ studioSettings.shortcuts.closeAll }}</kbd></button>
-      <hr /><button role="menuitem" @click="copyTabPath(tabMenu.id)"><span>复制路径</span><kbd data-no-localize>{{ studioSettings.shortcuts.copyPath }}</kbd></button>
-      <button role="menuitem" @click="copyTabPath(tabMenu.id, true)"><span>复制相对路径</span><kbd data-no-localize>{{ studioSettings.shortcuts.copyRelativePath }}</kbd></button>
-      <hr /><button role="menuitem" @click="revealTab(tabMenu.id)"><span>在文件资源管理器中显示</span><kbd data-no-localize>{{ studioSettings.shortcuts.reveal }}</kbd></button>
+      <button role="menuitem" @click="closeTabs('saved')"><span>关闭已保存</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'closeSaved') }}</kbd></button>
+      <button role="menuitem" @click="closeTabs('all')"><span>全部关闭</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'closeAll') }}</kbd></button>
+      <hr /><button role="menuitem" @click="copyTabPath(tabMenu.id)"><span>复制路径</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'copyPath') }}</kbd></button>
+      <button role="menuitem" @click="copyTabPath(tabMenu.id, true)"><span>复制相对路径</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'copyRelativePath') }}</kbd></button>
+      <hr /><button role="menuitem" @click="revealTab(tabMenu.id)"><span>在文件资源管理器中显示</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'reveal') }}</kbd></button>
       <button role="menuitem" @click="revealTab(tabMenu.id, true)"><span>在工作区中显示</span></button>
-      <hr /><button role="menuitem" @click="tabAction(() => retainVehicleTab(tabMenu!.id))"><span>保持打开</span><kbd data-no-localize>{{ studioSettings.shortcuts.keepOpen }}</kbd></button>
-      <button role="menuitem" @click="tabAction(() => pinTab(tabMenu!.id))"><span>{{ vehicleTabs.find(tab => tab.id === tabMenu!.id)?.pinned ? '取消固定' : '固定' }}</span><kbd data-no-localize>{{ studioSettings.shortcuts.pin }}</kbd></button>
+      <hr /><button role="menuitem" @click="tabAction(() => retainVehicleTab(tabMenu!.id))"><span>保持打开</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'keepOpen') }}</kbd></button>
+      <button role="menuitem" @click="tabAction(() => pinTab(tabMenu!.id))"><span>{{ vehicleTabs.find(tab => tab.id === tabMenu!.id)?.pinned ? '取消固定' : '固定' }}</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'pin') }}</kbd></button>
     </div>
     <div v-if="closingVehicleTab" class="modal-backdrop vehicle-tab-confirm" role="dialog" aria-modal="true" aria-labelledby="close-vehicle-title">
       <section class="dialog">

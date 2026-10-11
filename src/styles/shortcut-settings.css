@@ -1,0 +1,8 @@
+.shortcut-slots { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; width: 300px; max-width: 62%; flex-shrink: 0; }
+.shortcut-slot { position: relative; display: block; min-width: 0; }
+.shortcut-slots .shortcut-slot input { width: 100%; min-width: 0; height: 28px; min-height: 0; padding: 3px 24px 3px 7px; text-align: center; box-sizing: border-box; }
+.shortcut-slots .shortcut-slot input.duplicate { color: #d6b34e; border-color: #d6b34e; background: color-mix(in srgb, #d6b34e, transparent 90%); }
+.shortcut-slots .shortcut-clear { position: absolute; right: 3px; top: 50%; transform: translateY(-50%); width: 18px; height: 20px; min-height: 0; padding: 0; border: 0; border-radius: 2px; color: #ef6666; background: transparent; font: 16px/20px sans-serif; opacity: 0; visibility: hidden; pointer-events: none; }
+.shortcut-slot:focus-within .shortcut-clear { opacity: 1; visibility: visible; pointer-events: auto; }
+.shortcut-slots .shortcut-clear:hover, .shortcut-slots .shortcut-clear:focus { color: #ff7777; background: #ef666620; }
+.shortcut-list .shortcut-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; border-bottom: 1px solid var(--border); font-size: .78rem; }

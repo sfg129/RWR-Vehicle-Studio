@@ -1,20 +1,29 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import LanguageSelect from './LanguageSelect.vue';
 import { studioSettings, applySettings, resetShortcuts } from '../core/editor/studio-settings';
 import { desktop, type BackupSettings } from '../platform/desktop-api';
 import { studioShortcutGroups, shortcutFromEvent, type StudioShortcutAction } from '../core/editor/shortcuts';
+import { conflictingBindings, ShortcutCapture } from '../core/editor/shortcut-bindings';
 const emit = defineEmits<{ close: []; settingsChanged: [BackupSettings] }>();
 const section = ref('settings');
 const backup = ref<BackupSettings>();
 const error = ref('');
 const busy = ref(false);
-function editShortcut(event: KeyboardEvent, action: StudioShortcutAction) {
+const conflicts = computed(() => conflictingBindings(studioSettings.shortcuts, studioSettings.secondaryShortcuts));
+const capture = new ShortcutCapture();
+function binding(action: StudioShortcutAction, slot: number) { return (slot ? studioSettings.secondaryShortcuts : studioSettings.shortcuts)[action]; }
+function setBinding(action: StudioShortcutAction, slot: number, value: string) {
+  (slot ? studioSettings.secondaryShortcuts : studioSettings.shortcuts)[action] = value; applySettings();
+}
+function clearShortcut(action: StudioShortcutAction, slot: number) { capture.reset(); setBinding(action, slot, ''); }
+function editShortcut(event: KeyboardEvent, action: StudioShortcutAction, slot: number) {
   event.preventDefault(); event.stopPropagation();
-  if (event.key === 'Escape') { (event.target as HTMLInputElement).blur(); return; }
+  if (event.key === 'Escape') { capture.reset(); (event.target as HTMLInputElement).blur(); return; }
+  if (event.key === 'Delete' && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey) { clearShortcut(action, slot); return; }
+  if (event.repeat) return;
   const binding = shortcutFromEvent(event); if (!binding) return;
-  if (Object.entries(studioSettings.shortcuts).some(([id, key]) => id !== action && key === binding)) { error.value = '快捷键已被占用'; return; }
-  studioSettings.shortcuts[action] = binding; applySettings(); error.value = ''; (event.target as HTMLInputElement).blur();
+  setBinding(action, slot, capture.stroke(binding)); error.value = '';
 }
 onMounted(async () => { try { backup.value = await desktop.getBackupSettings(); } catch (e) { error.value = String(e); } });
 async function configure(enabled: boolean, directory?: string) {
@@ -51,7 +60,7 @@ async function openRepository(event: MouseEvent) {
       </div>
       <div v-else-if="section === 'shortcuts'" class="settings-content shortcut-list">
         <div class="shortcut-reset-row"><button @click="resetShortcuts(); error = ''">恢复默认</button></div>
-        <section v-for="group in studioShortcutGroups" :key="group.title" class="shortcut-group"><h3>{{ group.title }}</h3><div v-for="row in group.rows" :key="row[0]"><span>{{ row[1] }}</span><input readonly data-no-localize :data-shortcut-input="row[0]" :value="studioSettings.shortcuts[row[0]]" @keydown="editShortcut($event, row[0])" /></div></section>
+        <section v-for="group in studioShortcutGroups" :key="group.title" class="shortcut-group"><h3>{{ group.title }}</h3><div v-for="row in group.rows" :key="row[0]"><span>{{ row[1] }}</span><div class="shortcut-slots"><span v-for="slot in [0, 1]" :key="slot" class="shortcut-slot"><input readonly data-no-localize :aria-label="row[1]" :data-shortcut-input="row[0]" :data-shortcut-slot="slot" :class="{ duplicate: conflicts.has(binding(row[0], slot)) }" :value="binding(row[0], slot)" @focus="capture.reset()" @blur="capture.reset()" @keydown="editShortcut($event, row[0], slot)" /><button type="button" class="shortcut-clear" aria-label="清除" @pointerdown.prevent @click="clearShortcut(row[0], slot)">×</button></span></div></div></section>
       </div>
       <div v-else class="settings-content studio-about"><b>RWR Vehicle Studio</b><p>0.91 · GPL-3.0</p><a class="repository-button" href="https://github.com/sfg129/RWR-Vehicle-Studio" target="_blank" rel="noopener noreferrer" @click="openRepository">访问 GitHub 仓库</a></div>
       <p v-if="error" class="backup-error">{{ error }}</p>
