@@ -62,7 +62,7 @@ async function openRepository(event: MouseEvent) {
         <div class="shortcut-reset-row"><button @click="resetShortcuts(); error = ''">恢复默认</button></div>
         <section v-for="group in studioShortcutGroups" :key="group.title" class="shortcut-group"><h3>{{ group.title }}</h3><div v-for="row in group.rows" :key="row[0]"><span>{{ row[1] }}</span><div class="shortcut-slots"><span v-for="slot in [0, 1]" :key="slot" class="shortcut-slot"><input readonly data-no-localize :aria-label="row[1]" :data-shortcut-input="row[0]" :data-shortcut-slot="slot" :class="{ duplicate: conflicts.has(binding(row[0], slot)) }" :value="binding(row[0], slot)" @focus="capture.reset()" @blur="capture.reset()" @keydown="editShortcut($event, row[0], slot)" /><button type="button" class="shortcut-clear" aria-label="清除" @pointerdown.prevent @click="clearShortcut(row[0], slot)">×</button></span></div></div></section>
       </div>
-      <div v-else class="settings-content studio-about"><b>RWR Vehicle Studio</b><p>0.91 · GPL-3.0</p><a class="repository-button" href="https://github.com/sfg129/RWR-Vehicle-Studio" target="_blank" rel="noopener noreferrer" @click="openRepository">访问 GitHub 仓库</a></div>
+      <div v-else class="settings-content studio-about"><b>RWR Vehicle Studio</b><p>0.91.2 · GPL-3.0</p><a class="repository-button" href="https://github.com/sfg129/RWR-Vehicle-Studio" target="_blank" rel="noopener noreferrer" @click="openRepository">访问 GitHub 仓库</a></div>
       <p v-if="error" class="backup-error">{{ error }}</p>
       </div></div>
       <footer><button class="primary" @click="$emit('close')">完成</button></footer>

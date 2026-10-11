@@ -1096,7 +1096,7 @@ function ask(source: string): boolean { return window.confirm(localized(source))
 <template>
   <main class="app-shell">
     <header class="topbar">
-      <div class="brand"><strong>RWR VEHICLE STUDIO</strong><small>0.91</small></div>
+      <div class="brand"><strong>RWR VEHICLE STUDIO</strong><small>0.91.2</small></div>
       <nav>
         <span class="mode-tabs" data-no-localize><button :class="{ active: activeMode === 'editor' }" @click="activeMode = 'editor'">VEHICLE</button><button :class="{ active: activeMode === 'render' }" @click="activeMode = 'render'">ICON</button><button :class="{ active: activeMode === 'map' }" @click="activeMode = 'map'">MAP</button></span><span class="divider"></span>
         <div class="app-menu" @mouseenter="menu = 'file'" @mouseleave="menu = ''"><button :aria-expanded="menu === 'file'" aria-haspopup="menu" @click="menu = 'file'"><span>文件</span><span class="menu-arrow" aria-hidden="true">▾</span></button>
