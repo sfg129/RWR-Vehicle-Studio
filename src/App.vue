@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { displayPath } from './core/editor/display-path';
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
 import EditorViewport from './components/EditorViewport.vue';
 import IconRenderer from './components/IconRenderer.vue';
@@ -7,6 +8,7 @@ import OverrideDialog from './components/OverrideDialog.vue';
 import BackupManagerDialog from './components/BackupManagerDialog.vue';
 import WorkspaceSidebar from './components/WorkspaceSidebar.vue';
 import MapObjectEditor from './components/MapObjectEditor.vue';
+import FileDialogGuard from './components/FileDialogGuard.vue';
 import { desktop, type BackupSettings, type BackupRestoreResult, type OpenedFile, type VehicleSchema, type VehicleWorkspace, type VehicleWorkspaceEntry } from './platform/desktop-api';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog';
@@ -83,6 +85,10 @@ const lastEditedDoc = ref<'vehicle' | string>('vehicle');
 const saving = ref(false);
 const activeMode = ref<'editor' | 'render' | 'map'>('editor');
 const mapDirty = ref(false);
+const mapEditor = ref<InstanceType<typeof MapObjectEditor>>();
+const mapVisited = ref(false);
+const mapHistory = ref({ undo: false, redo: false, loaded: false });
+watch(activeMode, mode => { if (mode === 'map') mapVisited.value = true; });
 interface VehicleTabState {
   opened: OpenedFile; document: SourceDocument; savedText: string; undoStack: string[]; redoStack: string[];
   baseReference: string; baseOpened?: OpenedFile; baseDocument?: SourceDocument; baseAutomatic: boolean; baseError: string;
@@ -210,6 +216,7 @@ const anyDirty = computed(() => dirtyVehicleTabs.value.length > 0 || weaponDirty
 const dirtyWeaponSessions = computed(() => { void weaponRevision.value; return [...weaponSessions.values()].filter((session) => session.document.serialize() !== session.savedText); });
 const weaponShields = computed(() => { void weaponRevision.value; const session = weaponSession.value; if (!session) return []; return session.document.descendants('shield').map((node, index) => ({ node, index, offset: session.document.value(node, 'offset') ?? '', extent: session.document.value(node, 'extent') ?? '' })); });
 const canUndo = computed(() => {
+  if (activeMode.value === 'map') return mapHistory.value.undo;
   void weaponRevision.value;
   if (lastEditedDoc.value !== 'vehicle') {
     const session = weaponSessions.get(lastEditedDoc.value);
@@ -218,6 +225,7 @@ const canUndo = computed(() => {
   return undoStack.value.length > 0;
 });
 const canRedo = computed(() => {
+  if (activeMode.value === 'map') return mapHistory.value.redo;
   void weaponRevision.value;
   if (lastEditedDoc.value !== 'vehicle') return !!weaponSessions.get(lastEditedDoc.value)?.redoStack?.length;
   return redoStack.value.length > 0;
@@ -776,6 +784,7 @@ async function deleteAttribute(field: { sourceNode?: SourceNode; attr: string; n
   rebuildPreview(); status.value = `已删除属性 ${name}；可用 Ctrl+Z 恢复`; if (RESOURCE_ATTRS.has(name)) scheduleValidate();
 }
 async function undo() {
+  if (activeMode.value === 'map') { mapEditor.value?.undo(); return; }
   if (saving.value) { status.value = '保存中，请稍后再撤销'; return; }
   if (lastEditedDoc.value !== 'vehicle') {
     const session = weaponSessions.get(lastEditedDoc.value);
@@ -792,6 +801,7 @@ async function undo() {
   rebuildPreview(); scheduleValidate(); status.value = '已撤销上一次修改';
 }
 async function save(saveAs = false): Promise<boolean> {
+  if (activeMode.value === 'map') { await mapEditor.value?.save(); return !mapDirty.value; }
   if (!document.value || !opened.value || saving.value) return false;
   if (opened.value.path.startsWith('untitled:')) saveAs = true;
   const structuralErrors = document.value.structuralErrors;
@@ -819,7 +829,9 @@ async function save(saveAs = false): Promise<boolean> {
   catch (e) { fail(e); return false; }
   finally { saving.value = false; }
 }
-async function reload() { if (!opened.value || saving.value) { if (saving.value) status.value = '保存中，请稍后再重新载入'; return; }
+async function reload() {
+  if (activeMode.value === 'map') { await mapEditor.value?.reload(); return; }
+  if (!opened.value || saving.value) { if (saving.value) status.value = '保存中，请稍后再重新载入'; return; }
   if (dirty.value && !ask('此载具的未保存修改将丢失，仍要重新载入吗？')) return;
   const token = vehicleLoadToken; const file = opened.value;
   try { const text = await desktop.readText(file.path); if (token !== vehicleLoadToken || saving.value) return; await loadOpenedVehicle({ ...file, text }, true); } catch (e) { if (token === vehicleLoadToken) fail(e); } }
@@ -830,15 +842,16 @@ function keydown(event: KeyboardEvent) {
   if (event.defaultPrevented) return;
   if (event.key === 'Escape') { menu.value = ''; tabMenu.value = undefined; shortcutChord.value = ''; }
   if (closingVehicleTabId.value) { if (event.key === 'Escape' && !saving.value) cancelClose(); return; }
-  if (settingsDialog.value || resourceDialog.value || backupDialog.value || activeMode.value === 'map') return;
+  if (settingsDialog.value || resourceDialog.value || backupDialog.value) return;
   const stroke = shortcutFromEvent(event); if (!stroke) return;
   const match = matchShortcut(studioSettings.shortcuts, stroke, shortcutChord.value, studioSettings.secondaryShortcuts);
   shortcutChord.value = match.prefix ?? ''; clearTimeout(chordTimer);
   if (match.prefix) { event.preventDefault(); chordTimer = setTimeout(() => shortcutChord.value = '', 2000); return; }
   if (!match.action) return;
+  if (activeMode.value === 'map' && !['save', 'undo', 'redo', 'reload'].includes(match.action)) return;
   if (activeMode.value === 'render' && match.action !== 'open') return;
   if (['copy','cut','paste','selectAll','find'].includes(match.action) && !textMode.value) return;
-  if (match.action === 'undo' && !textMode.value && (event.target as HTMLElement)?.matches('input, textarea')) return;
+  if (['undo', 'redo'].includes(match.action) && (activeMode.value === 'map' || !textMode.value) && (event.target as HTMLElement)?.matches('input, textarea, select') && !(activeMode.value === 'map' && (event.target as HTMLElement).closest('.map-fields'))) return;
   event.preventDefault(); if (!event.repeat) runShortcut(match.action);
 }
 function runShortcut(action: StudioShortcutAction) {
@@ -1028,6 +1041,7 @@ function editText(value: string) {
   }, 250);
 }
 async function redo() {
+  if (activeMode.value === 'map') { mapEditor.value?.redo(); return; }
   if (saving.value) return;
   if (lastEditedDoc.value !== 'vehicle') {
     const session = weaponSessions.get(lastEditedDoc.value); const value = session?.redoStack?.pop();
@@ -1095,17 +1109,18 @@ function ask(source: string): boolean { return window.confirm(localized(source))
 
 <template>
   <main class="app-shell">
+    <FileDialogGuard />
     <header class="topbar">
-      <div class="brand"><strong>RWR VEHICLE STUDIO</strong><small>0.91.2</small></div>
+      <div class="brand"><strong>RWR VEHICLE STUDIO</strong><small>0.91.3</small></div>
       <nav>
         <span class="mode-tabs" data-no-localize><button :class="{ active: activeMode === 'editor' }" @click="activeMode = 'editor'">VEHICLE</button><button :class="{ active: activeMode === 'render' }" @click="activeMode = 'render'">ICON</button><button :class="{ active: activeMode === 'map' }" @click="activeMode = 'map'">MAP</button></span><span class="divider"></span>
         <div class="app-menu" @mouseenter="menu = 'file'" @mouseleave="menu = ''"><button :aria-expanded="menu === 'file'" aria-haspopup="menu" @click="menu = 'file'"><span>文件</span><span class="menu-arrow" aria-hidden="true">▾</span></button>
           <div v-if="menu === 'file'" class="menu-dropdown" role="menu" @click="menu = ''">
             <button role="menuitem" @click="newFile"><span>新建</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'newFile') }}</kbd></button>
             <button role="menuitem" @click="openVehicle"><span>打开</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'open') }}</kbd></button>
-            <hr /><button role="menuitem" :disabled="!document || saving" @click="save(false)"><span>保存</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'save') }}</kbd></button>
-            <button role="menuitem" :disabled="!document || saving" @click="save(true)"><span>另存为</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'saveAs') }}</kbd></button>
-            <button role="menuitem" :disabled="!document || saving" @click="reload"><span>重新载入</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'reload') }}</kbd></button>
+            <hr /><button role="menuitem" :disabled="(activeMode === 'map' ? !mapHistory.loaded : !document) || saving" @click="save(false)"><span>保存</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'save') }}</kbd></button>
+            <button role="menuitem" :disabled="activeMode === 'map' || !document || saving" @click="save(true)"><span>另存为</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'saveAs') }}</kbd></button>
+            <button role="menuitem" :disabled="(activeMode === 'map' ? !mapHistory.loaded : !document) || saving" @click="reload"><span>重新载入</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'reload') }}</kbd></button>
             <hr /><button role="menuitem" :disabled="!document || saving" @click="requestCloseVehicleTab(activeVehicleTabId)"><span>关闭</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'close') }}</kbd></button>
             <button role="menuitem" @click="closeTabs('all')"><span>全部关闭</span><kbd data-no-localize>{{ shortcutLabel(studioSettings.shortcuts, studioSettings.secondaryShortcuts, 'closeAll') }}</kbd></button>
           </div>
@@ -1125,7 +1140,7 @@ function ask(source: string): boolean { return window.confirm(localized(source))
         <div class="unsaved-weapons-list">
           <div class="unsaved-weapons-toolbar"><button class="small primary" :disabled="saving" @click="saveAllWeapons">全部保存</button><button class="small" @click="discardAllWeapons">全部放弃</button></div>
           <article v-for="session in dirtyWeaponSessions" :key="session.path">
-            <b class="ellipsis">{{ session.name }}</b><span class="ellipsis" :title="session.path">{{ session.path }}</span>
+            <b class="ellipsis">{{ session.name }}</b><span class="ellipsis" :title="displayPath(session.path)">{{ displayPath(session.path) }}</span>
             <div><button class="small" :disabled="saving" @click="saveOneWeapon(session)">保存</button><button class="small" @click="discardWeaponSession(session)">放弃</button></div>
           </article>
         </div>
@@ -1135,7 +1150,7 @@ function ask(source: string): boolean { return window.confirm(localized(source))
     <section v-show="activeMode === 'editor'" class="workspace has-vehicle-tabs" :class="{ 'text-mode': textMode && document }">
       <div ref="vehicleTabsBar" class="vehicle-tabs" role="tablist" aria-label="载具标签页">
         <div v-for="tab in vehicleTabs" :key="tab.id" class="vehicle-tab" :class="{ active: tab.id === activeVehicleTabId, preview: tab.preview, dirty: isVehicleTabDirty(tab), pinned: tab.pinned }" @contextmenu.prevent="showTabMenu($event, tab.id)" @auxclick.middle.prevent="requestCloseVehicleTab(tab.id)">
-          <button class="vehicle-tab-select" role="tab" :aria-selected="tab.id === activeVehicleTabId" :title="tab.state.opened.path" :disabled="saving" @click="activateVehicleTab(tab.id)" @dblclick="retainVehicleTab(tab.id)"><span class="ellipsis" data-no-localize>{{ tab.state.opened.name }}</span></button>
+          <button class="vehicle-tab-select" role="tab" :aria-selected="tab.id === activeVehicleTabId" :title="displayPath(tab.state.opened.path)" :disabled="saving" @click="activateVehicleTab(tab.id)" @dblclick="retainVehicleTab(tab.id)"><span class="ellipsis" data-no-localize>{{ tab.state.opened.name }}</span></button>
           <button class="vehicle-tab-close" :class="{ 'pinned-close': tab.pinned }" :disabled="saving" :aria-label="tab.pinned ? '取消固定' : `关闭 ${tab.state.opened.name}`" :title="tab.pinned ? '取消固定' : isVehicleTabDirty(tab) ? '未保存 · 关闭' : '关闭'" @click="tab.pinned ? pinTab(tab.id) : requestCloseVehicleTab(tab.id)"><span class="tab-close-cross">×</span><svg v-if="tab.pinned" class="tab-pin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.15" aria-hidden="true"><path d="m9.5 1.5 5 5-1.8 1.1-1.1 3.2-2.2-.7-3.1-3.1-.7-2.2 3.2-1.1zM7.9 8.1 2.3 13.7" /></svg><span v-else-if="isVehicleTabDirty(tab)" class="tab-dirty-dot"></span></button>
         </div>
       </div>
@@ -1151,7 +1166,7 @@ function ask(source: string): boolean { return window.confirm(localized(source))
               <div v-else-if="vehicleWorkspace && !workspaceRows.length" class="workspace-empty">此文件夹为空</div>
               <div v-else ref="workspaceTree" class="workspace-tree">
                 <TransitionGroup name="tree" tag="div">
-                  <button v-for="row in workspaceRows" :key="row.entry.path" class="list-item workspace-entry" :class="{ directory: row.entry.isDirectory, vehicle: row.entry.isVehicle, other: !row.entry.isDirectory && !row.entry.isVehicle, active: opened && vehiclePathKey(opened.path) === vehiclePathKey(row.entry.path) }" :style="{ paddingLeft: `${9 + row.depth * 14}px` }" :title="row.entry.path" @click="activateWorkspaceEntry(row.entry)">
+                  <button v-for="row in workspaceRows" :key="row.entry.path" class="list-item workspace-entry" :class="{ directory: row.entry.isDirectory, vehicle: row.entry.isVehicle, other: !row.entry.isDirectory && !row.entry.isVehicle, active: opened && vehiclePathKey(opened.path) === vehiclePathKey(row.entry.path) }" :style="{ paddingLeft: `${9 + row.depth * 14}px` }" :title="displayPath(row.entry.path)" @click="activateWorkspaceEntry(row.entry)">
                     <span class="workspace-kind">{{ row.entry.isDirectory ? (expandedWorkspacePaths.has(row.entry.path) ? '▾' : '▸') : row.entry.isVehicle ? 'V' : '·' }}</span><span class="ellipsis">{{ row.entry.name }}</span>
                   </button>
                 </TransitionGroup>
@@ -1221,7 +1236,7 @@ function ask(source: string): boolean { return window.confirm(localized(source))
 
       <section class="viewport-panel">
         <EditorViewport v-if="previewDocument" :document="previewDocument" :catalog="catalog" :soldier="soldier" :options="options" :selected-id="selectedId" :selected-entrance="selectedEntrance" :selected-turret-pivot="selectedTurretPivot" :turret-preview-degrees="turretPreviewDegrees" :revision="sceneRevision" :vehicle-key="opened?.path" :resource-generation="resourceGeneration" :editing-enabled="!saving" @select="select" @move="move" @pivot-move="moveTurretPivot" @rotate="rotateEntrance" @diagnostic="pushSceneDiagnostic" />
-        <div v-if="!document" class="viewport-empty"><b>NO VEHICLE LOADED</b><button class="primary" @click="openVehicle">选择载具文件</button></div>
+
         <div v-if="selectedTurretPivot" class="turret-pivot-editor">
           <b>炮塔旋转预览</b>
           <input v-model.number="turretPreviewDegrees" type="range" min="-180" max="180" step="1" />
@@ -1248,8 +1263,8 @@ function ask(source: string): boolean { return window.confirm(localized(source))
           <datalist id="root-attr-hints"><option v-for="name in rootAvailableAttributes" :key="name" :value="name" /></datalist>
           <button class="small" :disabled="!newRootAttribute" @click="addRootAttribute">加入根属性</button>
         </div>
-        <div v-if="!selected" class="empty-state">从场景对象中选择一项。</div>
-        <div v-else class="field-list">
+
+        <div v-if="selected" class="field-list">
           <label v-for="field in fields" class="field-row" :key="`${field.node.id}:${field.attr}`">
             <span class="ellipsis"><small>{{ field.section }}{{ field.inherited ? ' · 基础只读' : '' }}</small>{{ field.attr }}</span>
             <input :value="field.value" :disabled="!field.sourceNode" @change="edit(field, $event)" />
@@ -1260,7 +1275,7 @@ function ask(source: string): boolean { return window.confirm(localized(source))
           <header><div><small>WEAPON SHIELDS</small><b class="ellipsis">{{ weaponSession?.name || selectedWeaponKey || '未引用武器' }}</b></div><em v-if="weaponDirty">未保存</em></header>
           <p v-if="weaponLoadError" class="weapon-error">{{ weaponLoadError }}</p>
           <template v-else-if="weaponSession">
-            <p class="weapon-path ellipsis" :title="weaponSession.path">{{ weaponSession.path }}</p>
+            <p class="weapon-path ellipsis" :title="displayPath(weaponSession.path)">{{ displayPath(weaponSession.path) }}</p>
             <div v-if="!weaponShields.length" class="weapon-empty">此武器没有 shield，可在下方增加。</div>
             <article v-for="shield in weaponShields" :key="shield.node.id" class="shield-card">
               <div><b>shield {{ shield.index }}</b><button class="field-delete" title="删除此 shield" @click="deleteShield(shield.node)">×</button></div>
@@ -1277,9 +1292,9 @@ function ask(source: string): boolean { return window.confirm(localized(source))
     </section>
 
     <IconRenderer v-if="activeMode === 'render'" :document="previewDocument" :catalog="catalog" :revision="sceneRevision" :resource-generation="resourceGeneration" :vehicle-key="opened?.path" :vehicle-name="opened?.name" />
-    <MapObjectEditor v-if="activeMode === 'map'" @dirty-change="mapDirty = $event" />
+    <MapObjectEditor v-if="mapVisited" v-show="activeMode === 'map'" ref="mapEditor" @dirty-change="mapDirty = $event" @history-change="mapHistory = $event" />
 
-    <footer v-if="activeMode !== 'map'" class="statusbar"><span><template v-if="sceneSummary">{{ sceneSummary }}<template v-if="status"> · </template></template>{{ status }}</span><span class="ellipsis">{{ opened?.path ?? '' }}</span></footer>
+    <footer v-if="activeMode === 'editor'" class="statusbar"><span><template v-if="sceneSummary">{{ sceneSummary }}<template v-if="status"> · </template></template>{{ status }}</span><span class="ellipsis">{{ displayPath(opened?.path) }}</span></footer>
     <Transition name="modal" appear><ResourceDialog v-if="resourceDialog" :catalog="catalog" :support-model="supportModel" :support-animations="supportAnimations" @close="resourceDialog = false" @apply="resourcesApplied" /></Transition>
     <Transition name="modal" appear><OverrideDialog v-if="overrideDialog" :catalog="catalog" @close="overrideDialog = false" @changed="overrideChanged" /></Transition>
     <Transition name="modal" appear><BackupManagerDialog v-if="backupDialog && backupEnabled" :roots="backupRoots" @close="backupDialog = false" @restored="backupRestored" /></Transition>

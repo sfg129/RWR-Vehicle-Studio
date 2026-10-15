@@ -115,7 +115,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.platform }}
-          path: RWR-Vehicle-Studio-*
+          path: |
+            RWR-Vehicle-Studio-*-portable.exe
+            RWR-Vehicle-Studio-*-x64-setup.exe
+            RWR-Vehicle-Studio-*-macos-universal.app.zip
+            RWR-Vehicle-Studio-*-macos-universal.dmg
+            RWR-Vehicle-Studio-*-linux-x64.AppImage
+            RWR-Vehicle-Studio-*-linux-x64.deb
           if-no-files-found: error
 
   finalize-release:
@@ -144,4 +150,17 @@ jobs:
             echo "No release assets found" >&2
             exit 1
           fi
+          VERSION="${RELEASE_TAG#v}"
+          if [ "${#assets[@]}" -ne 6 ]; then
+            echo "Expected exactly six application artifacts" >&2
+            exit 1
+          fi
+          for asset in "${assets[@]}"; do
+            case "$(basename "$asset")" in
+              "RWR-Vehicle-Studio-${VERSION}-portable.exe" | "RWR-Vehicle-Studio-${VERSION}-x64-setup.exe" | \
+              "RWR-Vehicle-Studio-${VERSION}-macos-universal.app.zip" | "RWR-Vehicle-Studio-${VERSION}-macos-universal.dmg" | \
+              "RWR-Vehicle-Studio-${VERSION}-linux-x64.AppImage" | "RWR-Vehicle-Studio-${VERSION}-linux-x64.deb") ;;
+              *) echo "Unexpected release artifact: $asset" >&2; exit 1 ;;
+            esac
+          done
           gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber

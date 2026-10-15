@@ -34,7 +34,7 @@ const presetName = ref(presets.value.find((preset) => preset.id === selectedPres
 const selectedKey = ref('');
 const offsets = reactive<IconPartOffsets>({});
 const host = ref<HTMLElement>();
-const status = ref('等待载具与资源');
+const status = ref('.vehicle未加载');
 const diagnostics = ref<string[]>([]);
 const exporting = ref(false);
 let controller: IconRenderController | undefined;
@@ -81,7 +81,7 @@ watch(parts, (value) => {
 async function rebuildScene(): Promise<void> {
   const token = ++sceneToken;
   await nextTick();
-  if (!controller || !props.document) { status.value = '请先打开 .vehicle 载具'; return; }
+  if (!controller || !props.document) { status.value = '.vehicle未加载'; return; }
   status.value = '正在组合外观与武器模型…';
   diagnostics.value = [];
   try {
@@ -199,7 +199,7 @@ function ask(source: string): boolean { return window.confirm(localized(source))
   <section class="icon-render-workspace">
     <aside class="icon-parts-panel">
       <div class="panel-title"><small>RENDER PARTS</small><h2>渲染部件</h2></div>
-      <div v-if="!document" class="empty-state">先从顶部打开一个 `.vehicle` 文件。</div>
+      <p v-if="!document" class="muted">.vehicle未加载</p>
       <div v-else class="icon-part-list">
         <button v-for="part in parts" :key="part.key" class="list-item icon-part-item" :class="{ active: selectedKey === part.key }" @click="selectedKey = part.key">
           <span :class="['icon-part-kind', part.kind]">{{ part.kind === 'weapon' ? 'W' : 'V' }}</span>
@@ -221,7 +221,7 @@ function ask(source: string): boolean { return window.confirm(localized(source))
     <section class="icon-preview-panel">
       <div ref="host" class="icon-preview-host"></div>
       <div class="icon-preview-badge"><b>实时二值渲染</b><span>#000 / #FFF · 背景 {{ settings.background }}</span></div>
-      <div v-if="!document" class="viewport-empty"><b>NO VEHICLE LOADED</b></div>
+
       <div v-if="diagnostics.length" class="icon-diagnostics"><b>资源诊断 {{ diagnostics.length }}</b><span v-for="item in diagnostics.slice(0, 5)" :key="item" class="ellipsis" :title="item">{{ item }}</span></div>
     </section>
 

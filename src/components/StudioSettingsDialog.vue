@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { displayPath } from '../core/editor/display-path';
 import { computed, onMounted, ref } from 'vue';
 import LanguageSelect from './LanguageSelect.vue';
 import { studioSettings, applySettings, resetShortcuts } from '../core/editor/studio-settings';
@@ -56,13 +57,13 @@ async function openRepository(event: MouseEvent) {
         <label><span>字体大小</span><div class="font-slider"><input v-model.number="studioSettings.fontSize" type="range" min="12" max="20" @input="applySettings" /><output>{{ studioSettings.fontSize }}px</output></div></label>
         <label><span>界面缩放</span><div class="font-slider"><input v-model.number="studioSettings.uiScale" type="range" min="85" max="120" step="5" @input="applySettings" /><output>{{ studioSettings.uiScale }}%</output></div></label>
         <label class="backup-toggle"><span>启用备份</span><input type="checkbox" :checked="backup?.enabled" :disabled="busy || !backup" @change="configure(($event.target as HTMLInputElement).checked)" /></label>
-        <div v-if="backup?.enabled" class="settings-directory"><span>备份位置</span><button class="ellipsis" :title="backup.directory" @click="openDirectory" data-no-localize>{{ backup.directory }}</button><div><button :disabled="busy" @click="chooseDirectory">选择目录</button><button :disabled="busy" @click="configure(backup!.enabled, '')">默认目录</button><button @click="openDirectory">在资源管理器中打开</button></div></div>
+        <div v-if="backup?.enabled" class="settings-directory"><span>备份位置</span><button class="ellipsis" :title="displayPath(backup.directory)" @click="openDirectory" data-no-localize>{{ displayPath(backup.directory) }}</button><div><button :disabled="busy" @click="chooseDirectory">选择目录</button><button :disabled="busy" @click="configure(backup!.enabled, '')">默认目录</button><button @click="openDirectory">在资源管理器中打开</button></div></div>
       </div>
       <div v-else-if="section === 'shortcuts'" class="settings-content shortcut-list">
         <div class="shortcut-reset-row"><button @click="resetShortcuts(); error = ''">恢复默认</button></div>
         <section v-for="group in studioShortcutGroups" :key="group.title" class="shortcut-group"><h3>{{ group.title }}</h3><div v-for="row in group.rows" :key="row[0]"><span>{{ row[1] }}</span><div class="shortcut-slots"><span v-for="slot in [0, 1]" :key="slot" class="shortcut-slot"><input readonly data-no-localize :aria-label="row[1]" :data-shortcut-input="row[0]" :data-shortcut-slot="slot" :class="{ duplicate: conflicts.has(binding(row[0], slot)) }" :value="binding(row[0], slot)" @focus="capture.reset()" @blur="capture.reset()" @keydown="editShortcut($event, row[0], slot)" /><button type="button" class="shortcut-clear" aria-label="清除" @pointerdown.prevent @click="clearShortcut(row[0], slot)">×</button></span></div></div></section>
       </div>
-      <div v-else class="settings-content studio-about"><b>RWR Vehicle Studio</b><p>0.91.2 · GPL-3.0</p><a class="repository-button" href="https://github.com/sfg129/RWR-Vehicle-Studio" target="_blank" rel="noopener noreferrer" @click="openRepository">访问 GitHub 仓库</a></div>
+      <div v-else class="settings-content studio-about"><b>RWR Vehicle Studio</b><p>0.91.3 · GPL-3.0</p><a class="repository-button" href="https://github.com/sfg129/RWR-Vehicle-Studio" target="_blank" rel="noopener noreferrer" @click="openRepository">访问 GitHub 仓库</a></div>
       <p v-if="error" class="backup-error">{{ error }}</p>
       </div></div>
       <footer><button class="primary" @click="$emit('close')">完成</button></footer>

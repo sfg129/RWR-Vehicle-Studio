@@ -9,7 +9,8 @@ import { SoldierAssets, SOLDIER_GAME_SCALE, rwrLinearToDisplay } from '../src/co
 import { BUILTIN_SUPPORT_ANIMATIONS, BUILTIN_SUPPORT_MODEL, cloneResourceSelection } from '../src/core/resources/resource-presets';
 import { flattenWorkspace } from '../src/core/workspace/vehicle-workspace';
 
-const root = String.raw`D:\steam\steamapps\common\RunningWithRifles\media\packages\ww2_base`;
+// Installed-game checks are opt-in; ordinary tests must not depend on a developer's modded game files.
+const root = process.env.RWR_WW2_BASE_ROOT ?? '';
 const stuart = join(root, 'vehicles', 'stuart_base.vehicle');
 const sdkfz = join(root, 'vehicles', 'sdkfz251_mortar.vehicle');
 const m10 = join(root, 'vehicles', 'm10.vehicle');
@@ -18,7 +19,7 @@ const pak40Overlay = join(root, 'vehicles', 'at_gun_pak40_2.vehicle');
 const soldierModel = join(process.cwd(), 'src-tauri', 'resources', 'soldier_army_normandy_ranger_1.xml');
 const soldierAnimations = join(process.cwd(), 'src-tauri', 'resources', 'soldier_animations.xml');
 
-describe.skipIf(!existsSync(stuart) || !existsSync(sdkfz) || !existsSync(m10) || !existsSync(pak40Base) || !existsSync(pak40Overlay))('实物载具 XML', () => {
+describe.skipIf(!root || !existsSync(stuart) || !existsSync(sdkfz) || !existsSync(m10) || !existsSync(pak40Base) || !existsSync(pak40Overlay))('实物载具 XML', () => {
   it('解析 Stuart 的基础、炮塔、外观和乘员，并保真修改一个属性', () => {
     const text = readFileSync(stuart, 'utf8'); const doc = new SourceDocument(text); const entries = sceneEntries(doc);
     expect(entries.filter((e) => e.kind === 'turret')).toHaveLength(4);
@@ -81,7 +82,7 @@ describe.skipIf(!existsSync(stuart) || !existsSync(sdkfz) || !existsSync(m10) ||
   });
 });
 
-describe.skipIf(!existsSync(join(root, 'models', 'stuart_chassis.mesh')))('实物 OGRE mesh', () => {
+describe.skipIf(!root || !existsSync(join(root, 'models', 'stuart_chassis.mesh')))('实物 OGRE mesh', () => {
   for (const name of ['stuart_chassis.mesh', 'stuart_track.mesh', 'stuart_turret.mesh', 'sdkfz251_chassis.mesh', 'sdkfz251_track.mesh', 'heavy_mortar_base.mesh']) {
     it(`解析 ${name}`, () => {
       const b = readFileSync(join(root, 'models', name)); const data = b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer;

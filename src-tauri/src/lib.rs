@@ -79,18 +79,23 @@ fn local_path(value: FilePath) -> Result<PathBuf, String> {
     value.into_path().map_err(|_| "只支持本地文件系统路径".to_string())
 }
 
-async fn receive_file<F>(start: F) -> Result<Option<FilePath>, String>
-where F: FnOnce(Box<dyn FnOnce(Option<FilePath>) + Send>)
+fn owned_file_dialog(app: &AppHandle) -> Result<tauri_plugin_dialog::FileDialogBuilder<tauri::Wry>, String> {
+    let owner = app.get_webview_window("main").ok_or_else(|| "主窗口已关闭".to_string())?;
+    Ok(app.dialog().file().set_parent(&owner))
+}
+
+async fn receive_file<F>(app: &AppHandle, start: F) -> Result<Option<FilePath>, String>
+where F: FnOnce(tauri_plugin_dialog::FileDialogBuilder<tauri::Wry>, Box<dyn FnOnce(Option<FilePath>) + Send>)
 {
     let (tx, mut rx) = tauri::async_runtime::channel(1);
-    start(Box::new(move |picked| { let _ = tx.try_send(picked); }));
+    start(owned_file_dialog(app)?, Box::new(move |picked| { let _ = tx.try_send(picked); }));
     rx.recv().await.ok_or_else(|| "文件选择窗口意外关闭".to_string())
 }
 
 #[tauri::command]
 async fn open_vehicle(app: AppHandle, state: State<'_, AppState>) -> Result<Option<OpenedFile>, String> {
-    let picked = receive_file(|done| {
-        app.dialog().file().pick_file(done);
+    let picked = receive_file(&app, |dialog, done| {
+        dialog.pick_file(done);
     }).await?;
     let Some(picked) = picked else { return Ok(None) };
     let path = local_path(picked)?;
@@ -129,8 +134,8 @@ fn resolve_vehicle_base(state: State<'_, AppState>, path: String, reference: Str
 
 #[tauri::command]
 async fn choose_vehicle_base(app: AppHandle) -> Result<Option<OpenedFile>, String> {
-    let picked = receive_file(|done| {
-        app.dialog().file().add_filter("RWR 基础载具", &["vehicle", "xml"]).pick_file(done);
+    let picked = receive_file(&app, |dialog, done| {
+        dialog.add_filter("RWR 基础载具", &["vehicle", "xml"]).pick_file(done);
     }).await?;
     let Some(picked) = picked else { return Ok(None) };
     let path = local_path(picked)?;
@@ -193,7 +198,7 @@ fn canonical_read_path(path: &Path) -> Result<PathBuf, String> {
 #[tauri::command]
 async fn choose_vehicle_workspace(app: AppHandle) -> Result<Option<VehicleWorkspace>, String> {
     let (tx, mut rx) = tauri::async_runtime::channel(1);
-    app.dialog().file().pick_folder(move |picked| { let _ = tx.try_send(picked); });
+    owned_file_dialog(&app)?.pick_folder(move |picked| { let _ = tx.try_send(picked); });
     let picked = rx.recv().await.ok_or_else(|| "文件夹选择窗口意外关闭".to_string())?;
     let Some(picked) = picked else { return Ok(None) };
     let path = local_path(picked)?;
@@ -338,7 +343,7 @@ fn list_workspace_dir(path: String) -> Result<Vec<VehicleWorkspaceEntry>, String
 #[tauri::command]
 async fn choose_folder(app: AppHandle, initial_path: Option<String>) -> Result<Option<String>, String> {
     let (tx, mut rx) = tauri::async_runtime::channel(1);
-    let mut dialog = app.dialog().file();
+    let mut dialog = owned_file_dialog(&app)?;
     if let Some(path) = initial_path.filter(|value| Path::new(value).is_dir()) { dialog = dialog.set_directory(path); }
     dialog.pick_folder(move |picked| { let _ = tx.try_send(picked); });
     let picked = rx.recv().await.ok_or_else(|| "文件夹选择窗口意外关闭".to_string())?;
@@ -350,7 +355,7 @@ async fn choose_folder(app: AppHandle, initial_path: Option<String>) -> Result<O
 
 #[tauri::command]
 async fn choose_override_file(app: AppHandle) -> Result<Option<String>, String> {
-    let picked = receive_file(|done| { app.dialog().file().pick_file(done); }).await?;
+    let picked = receive_file(&app, |dialog, done| { dialog.pick_file(done); }).await?;
     let Some(picked) = picked else { return Ok(None) };
     let path = local_path(picked)?;
     let path = canonical_read_path(&path)?;
@@ -360,7 +365,7 @@ async fn choose_override_file(app: AppHandle) -> Result<Option<String>, String> 
 #[tauri::command]
 async fn choose_support_file(app: AppHandle, kind: String) -> Result<Option<String>, String> {
     let label = if kind == "animation" { "人物动画 XML" } else { "人物模型 XML" };
-    let picked = receive_file(|done| { app.dialog().file().add_filter(label, &["xml"]).pick_file(done); }).await?;
+    let picked = receive_file(&app, |dialog, done| { dialog.add_filter(label, &["xml"]).pick_file(done); }).await?;
     let Some(picked) = picked else { return Ok(None) };
     let path = local_path(picked)?;
     let path = canonical_read_path(&path)?;
@@ -455,7 +460,7 @@ fn scan_map_workspace(path: String) -> Result<MapWorkspace, String> { scan_map_w
 #[tauri::command]
 async fn choose_map_output_folder(app: AppHandle, state: State<'_, AppState>, initial_path: Option<String>) -> Result<Option<String>, String> {
     let (tx, mut rx) = tauri::async_runtime::channel(1);
-    let mut dialog = app.dialog().file();
+    let mut dialog = owned_file_dialog(&app)?;
     if let Some(path) = initial_path.filter(|value| Path::new(value).is_dir()) { dialog = dialog.set_directory(path); }
     dialog.pick_folder(move |picked| { let _ = tx.try_send(picked); });
     let picked = rx.recv().await.ok_or_else(|| "文件夹选择窗口意外关闭".to_string())?;
@@ -515,8 +520,8 @@ fn directory_exists(path: String) -> bool { Path::new(&path).is_dir() }
 async fn save_render_png(app: AppHandle, suggested_name: String, base64: String) -> Result<Option<String>, String> {
     let safe_name = Path::new(&suggested_name).file_name().and_then(|value| value.to_str()).unwrap_or("vehicle-icon.png");
     let default_name = if safe_name.to_ascii_lowercase().ends_with(".png") { safe_name.to_string() } else { format!("{safe_name}.png") };
-    let picked = receive_file(|done| {
-        app.dialog().file().add_filter("PNG 图像", &["png"]).set_file_name(&default_name).save_file(done);
+    let picked = receive_file(&app, |dialog, done| {
+        dialog.add_filter("PNG 图像", &["png"]).set_file_name(&default_name).save_file(done);
     }).await?;
     let Some(picked) = picked else { return Ok(None) };
     let mut path = local_path(picked)?;
@@ -540,7 +545,7 @@ async fn save_vehicle(app: AppHandle, state: State<'_, AppState>, path: String, 
     let target = if save_as {
         let default_name = Path::new(&path).file_name().and_then(|v| v.to_str()).unwrap_or("edited.vehicle").to_string();
         let (tx, mut rx) = tauri::async_runtime::channel(1);
-        app.dialog().file().set_file_name(&default_name)
+        owned_file_dialog(&app)?.set_file_name(&default_name)
             .save_file(move |picked| { let _ = tx.try_send(picked); });
         let Some(picked) = rx.recv().await.ok_or_else(|| "保存窗口意外关闭".to_string())? else { return Ok(None) };
         local_path(picked)?

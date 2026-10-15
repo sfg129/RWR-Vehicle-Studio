@@ -14,11 +14,11 @@ const LEGACY_SETTINGS_KEY = 'rwr-vehicle-studio.map-object-settings.v2';
 
 export function defaultMapSettings(): MapSettings {
   return {
-    sourceMapsFolder: 'D:\\steam\\steamapps\\common\\RunningWithRifles\\media\\packages\\edelweiss\\maps',
-    outputMapsFolder: 'C:\\Users\\sfg1.DESKTOP-N02A6BA\\Desktop\\mymod\\edelweiss\\maps',
+    sourceMapsFolder: '',
+    outputMapsFolder: '',
     selectedMap: '',
-    vehicleFolder: 'C:\\Users\\sfg1.DESKTOP-N02A6BA\\Desktop\\mymod\\vehicles',
-    factionFolder: 'C:\\Users\\sfg1.DESKTOP-N02A6BA\\Desktop\\mymod\\factions',
+    vehicleFolder: '',
+    factionFolder: '',
   };
 }
 

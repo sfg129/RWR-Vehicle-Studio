@@ -38,3 +38,23 @@ Desktop.ini
 /*.xml
 /*.png
 /*.dds
+
+# Local development notes, generated prompts and workspace state
+/docs/
+/assets/*-prompt.txt
+/.codex/
+/.agents/
+/work/
+/outputs/
+/tmp/
+/temp/
+*.bak1
+*.bak.*
+*.lnk
+
+# Release artifacts belong on GitHub Releases, not in source control
+/*.exe
+/*.zip
+/*.dmg
+/*.AppImage
+/*.deb

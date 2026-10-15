@@ -7,6 +7,9 @@ function memoryStorage() {
 }
 
 describe('map folder presets', () => {
+  it('does not publish machine-specific directories as application defaults', () => {
+    expect(normalizeMapSettings(undefined)).toEqual({ sourceMapsFolder: '', outputMapsFolder: '', selectedMap: '', vehicleFolder: '', factionFolder: '' });
+  });
   it('retains all existing directories and the selected map when migrating old settings', () => {
     const storage = memoryStorage();
     const settings = { sourceMapsFolder: 'D:\\game\\maps', outputMapsFolder: 'C:\\mod\\maps', selectedMap: 'island2', vehicleFolder: 'C:\\mod\\vehicles', factionFolder: 'C:\\mod\\factions' };

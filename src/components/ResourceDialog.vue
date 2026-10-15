@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { displayPath } from '../core/editor/display-path';
 import { localized } from '../i18n/runtime';
 import { computed, onMounted, reactive, ref } from 'vue';
 import { desktop, type ResourceKind } from '../platform/desktop-api';
@@ -76,7 +77,7 @@ function removePreset() {
   persistPresets('');
 }
 function restoreSupport(kind: 'model' | 'animation') { if (kind === 'model') model.value = BUILTIN_SUPPORT_MODEL; else animations.value = BUILTIN_SUPPORT_ANIMATIONS; }
-function supportLabel(path: string, kind: 'model' | 'animation'): string { return isBuiltinSupport(path) ? `内置：${kind === 'model' ? 'Normandy Ranger 人物模型' : 'RWR 人物动画'}` : path; }
+function supportLabel(path: string, kind: 'model' | 'animation'): string { return isBuiltinSupport(path) ? `内置：${kind === 'model' ? 'Normandy Ranger 人物模型' : 'RWR 人物动画'}` : displayPath(path); }
 function addSecondary(kind: ResourceKind) { secondaryFolders[kind].push(''); }
 function removeSecondary(kind: ResourceKind, index: number) { secondaryFolders[kind].splice(index, 1); }
 function secondaryDraft(paths: string[]): string[] { return paths.length ? [...paths] : ['']; }
@@ -119,10 +120,10 @@ function ask(source: string): boolean { return window.confirm(localized(source))
     </section>
     <section v-for="row in resourceRows" :key="row.kind" class="resource-source-group">
       <label class="field-row path-row primary-source-row">
-        <span>{{ row.label }}</span><input v-model="folders[row.kind]" /><button @click="choose(row.kind)">浏览</button>
+        <span>{{ row.label }}</span><input :value="displayPath(folders[row.kind])" @input="folders[row.kind] = ($event.target as HTMLInputElement).value" /><button @click="choose(row.kind)">浏览</button>
       </label>
       <label v-for="(_, index) in secondaryFolders[row.kind]" :key="index" class="field-row path-row secondary-source-row">
-        <span>次要来源 {{ index + 1 }}</span><input v-model="secondaryFolders[row.kind][index]" placeholder="可选；主来源未找到时检索" /><button @click="choose(row.kind, index)">浏览</button><button class="source-adjust source-remove" title="删除此来源" @click="removeSecondary(row.kind, index)">−</button>
+        <span>次要来源 {{ index + 1 }}</span><input :value="displayPath(secondaryFolders[row.kind][index])" @input="secondaryFolders[row.kind][index] = ($event.target as HTMLInputElement).value" placeholder="可选；主来源未找到时检索" /><button @click="choose(row.kind, index)">浏览</button><button class="source-adjust source-remove" title="删除此来源" @click="removeSecondary(row.kind, index)">−</button>
       </label>
       <div class="secondary-source-actions"><button class="source-adjust" title="增加次要来源" @click="addSecondary(row.kind)">＋</button><small>增加{{ row.label.replace('文件夹', '') }}次要来源</small></div>
     </section>

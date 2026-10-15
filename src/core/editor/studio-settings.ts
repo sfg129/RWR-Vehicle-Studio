@@ -9,7 +9,7 @@ function load(): StudioSettings {
   let value: Partial<StudioSettings> = {};
   try { value = JSON.parse(localStorage.getItem(key) ?? '{}'); } catch { /* defaults */ }
   const shortcuts = loadShortcuts(value.shortcuts);
-  return { language: isAppLanguage(value.language) ? value.language : 'zh-CN', theme: value.theme === 'light' ? 'light' : 'dark', fontSize: Math.max(12, Math.min(20, Number(value.fontSize) || 16)), accent: /^#[0-9a-f]{6}$/i.test(value.accent ?? '') ? value.accent! : '#f0b84b', uiScale: Math.max(85, Math.min(120, Number(value.uiScale) || 100)), shortcuts, secondaryShortcuts: loadSecondaryShortcuts(value.secondaryShortcuts, shortcuts) };
+  return { language: isAppLanguage(value.language) ? value.language : 'zh-CN', theme: value.theme === 'light' ? 'light' : 'dark', fontSize: Math.max(12, Math.min(20, Number(value.fontSize) || 16)), accent: /^#[0-9a-f]{6}$/i.test(value.accent ?? '') && value.accent?.toLowerCase() !== '#f0b84b' ? value.accent! : '#74a5c3', uiScale: Math.max(85, Math.min(120, Number(value.uiScale) || 100)), shortcuts, secondaryShortcuts: loadSecondaryShortcuts(value.secondaryShortcuts, shortcuts) };
 }
 export const studioSettings = reactive(load());
 export function resetShortcuts() { studioSettings.shortcuts = { ...shortcutDefaults }; studioSettings.secondaryShortcuts = { ...secondaryShortcutDefaults }; applySettings(); }

@@ -1,3 +1,4 @@
+import { displayPath } from '../core/editor/display-path';
 import { vehicleMessages } from './vehicle-messages';
 import { vehiclePatterns } from './vehicle-patterns';
 import type { AppLanguage } from './languages';
@@ -367,6 +368,7 @@ function lookupKey(value: string): string {
 }
 
 export function translate(source: string, target: AppLanguage = 'en'): string {
+  source = displayPath(source);
   if (target === 'zh-CN') return source.trim();
   const content = normalized(source);
   const vehicle = vehicleMessages.get(content)?.[target];

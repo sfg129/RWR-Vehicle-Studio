@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { displayPath } from '../core/editor/display-path';
 import { localized } from '../i18n/runtime';
 import { computed, onMounted, ref } from 'vue';
 import { desktop, type BackupEntry, type BackupRestoreResult, type BackupSettings } from '../platform/desktop-api';
@@ -65,12 +66,12 @@ function ask(source: string): boolean { return window.confirm(localized(source))
         <div v-if="!loading && !entries.length" class="backup-empty">没有备份</div>
         <article v-for="entry in entries" :key="entry.backupPath" :class="{ active: activePath === entry.backupPath }" @click="activePath === entry.backupPath ? (activePath = '', preview = '') : openPreview(entry)">
           <input type="checkbox" :checked="checked.includes(entry.backupPath)" @click.stop @change="toggle(entry.backupPath, ($event.target as HTMLInputElement).checked)" />
-          <div><b>{{ entry.sourceName }}</b><span>{{ entry.backupName.endsWith('.bak1') ? '较早一代 · .bak1' : entry.backupName.endsWith('.bak') ? '最近一代 · .bak' : '旧版多代备份' }}</span><small :title="entry.backupPath">{{ formatTime(entry.modifiedMs) }} · {{ formatSize(entry.size) }}</small></div>
+          <div><b>{{ entry.sourceName }}</b><span>{{ entry.backupName.endsWith('.bak1') ? '较早一代 · .bak1' : entry.backupName.endsWith('.bak') ? '最近一代 · .bak' : '旧版多代备份' }}</span><small :title="displayPath(entry.backupPath)">{{ formatTime(entry.modifiedMs) }} · {{ formatSize(entry.size) }}</small></div>
           <em v-if="!entry.sourceExists">源文件缺失</em>
           <div class="backup-row-actions"><button class="tiny" :disabled="loading || configuring" @click.stop="openPreview(entry)">预览</button><button class="tiny primary" :disabled="loading || configuring || !settings" @click.stop="restore(entry)">恢复</button><button class="tiny danger" :disabled="loading || configuring" @click.stop="remove([entry.backupPath])">删除</button></div>
         </article>
       </section>
-      <section class="backup-preview"><header><b>{{ active?.backupName ?? '文本预览' }}</b><span class="ellipsis" :title="active?.sourcePath">{{ active?.sourcePath ?? '点击左侧备份查看内容' }}</span></header><pre data-no-localize>{{ preview }}</pre></section>
+      <section class="backup-preview"><header><b>{{ active?.backupName ?? '文本预览' }}</b><span class="ellipsis" :title="displayPath(active?.sourcePath)">{{ active ? displayPath(active.sourcePath) : '点击左侧备份查看内容' }}</span></header><pre data-no-localize>{{ preview }}</pre></section>
     </div>
     <footer><span class="muted">选中 {{ checked.length }} 项</span><button :disabled="loading" @click="revealBackup">在资源管理器中打开</button><button class="danger" :disabled="!checked.length || loading || configuring" @click="remove(checked)">批量删除</button><button :disabled="configuring" @click="$emit('close')">完成</button></footer>
   </section></div>

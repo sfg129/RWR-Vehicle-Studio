@@ -1,6 +1,10 @@
 import type { AppLanguage } from './languages';
 
 export const vehicleMessages = new Map<string, Partial<Record<AppLanguage, string>>>([
+[".vehicle未加载",{"en":".vehicle not loaded","zh-TW":".vehicle未載入","es":".vehicle no cargado","pt":".vehicle não carregado","de":".vehicle nicht geladen","fr":".vehicle non chargé","ru":".vehicle не загружен","ja":".vehicle 未読み込み"}],
+["写入目录：",{"en":"Output directory:","zh-TW":"寫入目錄：","es":"Directorio de salida:","pt":"Diretório de saída:","de":"Ausgabeverzeichnis:","fr":"Dossier de sortie :","ru":"Папка сохранения:","ja":"保存先フォルダー："}],
+["已撤销地图对象修改",{"en":"Map object edit undone","zh-TW":"已復原地圖物件修改","es":"Edición del objeto del mapa deshecha","pt":"Edição do objeto do mapa desfeita","de":"Kartenobjektänderung rückgängig gemacht","fr":"Modification de l’objet de carte annulée","ru":"Изменение объекта карты отменено","ja":"マップオブジェクトの変更を元に戻しました"}],
+["已重做地图对象修改",{"en":"Map object edit redone","zh-TW":"已重做地圖物件修改","es":"Edición del objeto del mapa rehecha","pt":"Edição do objeto do mapa refeita","de":"Kartenobjektänderung wiederhergestellt","fr":"Modification de l’objet de carte rétablie","ru":"Изменение объекта карты повторено","ja":"マップオブジェクトの変更をやり直しました"}],
 ["快捷键已被占用",{"en":"Shortcut already in use","zh-TW":"快捷鍵已被使用","es":"El atajo ya está en uso","pt":"Atalho já em uso","de":"Tastenkombination bereits belegt","fr":"Raccourci déjà utilisé","ru":"Сочетание клавиш уже используется","ja":"ショートカットは使用中です"}],
 ["基础操作",{"en":"Basic operations","zh-TW":"基本操作","es":"Operaciones básicas","pt":"Operações básicas","de":"Grundbedienung","fr":"Opérations de base","ru":"Основные действия","ja":"基本操作"}],
 ["换行",{"en":"New line","zh-TW":"換行","es":"Nueva línea","pt":"Nova linha","de":"Neue Zeile","fr":"Nouvelle ligne","ru":"Новая строка","ja":"改行"}],
