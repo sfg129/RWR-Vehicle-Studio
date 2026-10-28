@@ -7,6 +7,13 @@ function state(name: string): VehicleTabDocument {
   return { opened: { name: `${name}.vehicle`, path: `C:/vehicles/${name}.vehicle`, text }, document: new SourceDocument(text), savedText: text };
 }
 describe('vehicle preview tabs', () => {
+  it('returns a retained inactive tab to clean when its content is restored', () => {
+    const result = insertVehicleTab([], state('a')), tab = result.tabs[0]; tab.preview = false;
+    tab.state.document.set(tab.state.document.root!, 'name', 'edited'); expect(vehicleTabDirty(tab)).toBe(true);
+    tab.state.document.set(tab.state.document.root!, 'name', 'a'); expect(vehicleTabDirty(tab)).toBe(false);
+    expect(insertVehicleTab(result.tabs, state('b')).tabs).toHaveLength(2);
+    expect(tab.preview).toBe(false);
+  });
   it('replaces only the clean preview and preserves fixed tab order', () => {
     const a = insertVehicleTab([], state('a'));
     a.tabs[0].preview = false;

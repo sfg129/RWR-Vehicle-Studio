@@ -16,6 +16,7 @@ import {
 } from '../core/icon-render/icon-render-presets';
 import { IconRenderController, iconRenderParts } from '../editor/icon-render-controller';
 import { desktop } from '../platform/desktop-api';
+import PresetSelect from './PresetSelect.vue';
 
 const props = defineProps<{
   document?: SourceDocument;
@@ -45,6 +46,7 @@ const parts = computed(() => props.document ? iconRenderParts(props.document) : 
 const selectedPart = computed(() => parts.value.find((part) => part.key === selectedKey.value));
 const selectedOffset = computed<Vec3>(() => offsets[selectedKey.value] ?? [0, 0, 0]);
 const selectedPreset = computed(() => presets.value.find((preset) => preset.id === selectedPresetId.value));
+const presetOptions = computed(() => presets.value.map(preset => ({ value: preset.id, label: preset.name })));
 
 onMounted(() => {
   if (!host.value) return;
@@ -141,6 +143,11 @@ function loadPreset(): void {
   status.value = `已载入渲染预设“${preset.name}”`;
 }
 
+function selectPreset(id: string): void {
+  selectedPresetId.value = id;
+  loadPreset();
+}
+
 function removePreset(): void {
   const preset = selectedPreset.value;
   if (!preset || !ask(`删除渲染预设“${preset.name}”？`)) return;
@@ -230,7 +237,7 @@ function ask(source: string): boolean { return window.confirm(localized(source))
 
       <section class="icon-settings-group icon-preset-box">
         <header><b>参数预设</b><button class="tiny" @click="resetSettings">恢复默认</button></header>
-        <div class="icon-preset-row"><select v-model="selectedPresetId" @change="loadPreset"><option value="">选择预设</option><option v-for="preset in presets" :key="preset.id" :value="preset.id">{{ preset.name }}</option></select><button :disabled="!selectedPreset" @click="removePreset">删除</button></div>
+        <div class="icon-preset-row"><PresetSelect :model-value="selectedPresetId" :options="presetOptions" :label="localized('参数预设')" :placeholder="localized('选择预设')" @select="selectPreset"/><button :disabled="!selectedPreset" @click="loadPreset">读取</button><button :disabled="!selectedPreset" @click="removePreset">删除</button></div>
         <div class="icon-preset-row"><input v-model="presetName" placeholder="预设名称；同名覆盖" /><button class="primary" @click="savePreset">保存</button></div>
       </section>
 
